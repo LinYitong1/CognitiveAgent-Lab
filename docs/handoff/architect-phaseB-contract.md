@@ -177,4 +177,11 @@ TRIAL: FIXATION(timing.fixation_ms) → STIMULUS(timing.stimulus_ms|null=直至�
 - 不实现 pointer/touch、暂停/重试、素材动画、多语言；
 - 不接真实 LLM、不做 Ollama 兼容测试（已知问题 PA-14 处置不变）。
 
+## §9 B0 实施澄清（Architect 补充，2026-10-20 实施前）
+
+1. **状态机标记（用户要求 6）**：§3 状态机（READY→…→END_SUMMARY）为 **MVP 支持的流程**，非永久架构限制。未来新交互类型（暂停/跳过/pointer/touch/多阶段试次）经契约修订进入，不影响 GameSpec 其余部分。
+2. **bundle_sha256 计算对象（用户要求 7）**：与 Phase A 完全一致、不重定义——`SHA-256(canonical_json(bundle 剥离 "bundle_sha256" 与 "generated_at" 两键))`（见 `src/experiment/export.py`）。三指纹区别：`config_fingerprint` 只覆盖 **spec 配置**（条件设计）；`trials_fingerprint` 只覆盖 **试次序列**（顺序+分配）；`bundle_sha256` 覆盖**整包**（spec+trials+reproducibility+summary），`generated_at` 时间戳不参与任何指纹。G2 验证时**重算整包指纹**并与 `ref.bundle_sha256` 及 `bundle["bundle_sha256"]` 两者比对——验证过程可复现且能检出 Bundle 被篡改。
+3. **GB-8 内省豁免（草案内部不一致修正，如实报告）**：§1 D-1 禁止名集合含 `seed`，但 §2 `ExperimentRef.seed` 是 v2.1 已冻结的**引用复制字段**（只读指针，非实验逻辑所有权）。修正：GB-8 的禁止名交集检查**排除 ExperimentRef 子树**（其全部字段均为引用）；其余字段树与禁止名集合交集必须为空。此为 B0 草案自纠，不涉及 Phase A 契约。
+4. **GB-6 警告场景明确**：采用 `PARTIAL_OPTION_COVERAGE`（choice 响应的键位绑定未覆盖全部 options——合法但可能有选项不可达）。
+
 —— 契约草案即止。等待用户审核；批准后 B0 实施 `game_schemas.py` + `validate_game`（校验函数，非工具）+ GB 测试。
