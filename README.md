@@ -68,7 +68,7 @@ cognitive-agent verify data/experiments/demo-agent-game.json
 |---|---|
 | Python | >= 3.13 |
 | From a clone | `python3.13 -m venv .venv && .venv/bin/pip install -e .` |
-| From git | `pip install "cognitive-agent-lab @ git+https://github.com/<org>/cognitive-agent-lab.git"` (URL once published) |
+| From git | `pip install "cognitive-agent-lab @ git+https://github.com/LinYitong1/CognitiveAgent-Lab.git"` |
 | Console script | `cognitive-agent` (installed on PATH by `pip install`) |
 | Dependencies | FastAPI, Pydantic v2, pydantic-settings, httpx, openai SDK — nothing else (see pyproject.toml) |
 | Keys | Optional; `demo` and the whole test suite need zero keys |
@@ -236,7 +236,7 @@ end summary, event-log download, tamper resistance):
   [docs/checklists/browser-playtest-checklist.md](docs/checklists/browser-playtest-checklist.md)
   (browser playtest checklist).
 - **Internal development records** (`docs/handoff/`, `docs/plans/`, `docs/proposals/`,
-  `docs/research/`, plus `docs/ENVIRONMENT_AUDIT.md`): milestone contracts, QA reports,
+  `docs/research/`): milestone contracts, QA reports,
   diagnosis records and planning notes kept for traceability. These are archival working
   documents, mostly in Chinese, and are not maintained as user documentation.
 

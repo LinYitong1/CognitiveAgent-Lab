@@ -1,6 +1,6 @@
 # CognitiveAgent Lab — Agent Role Definitions (development team configuration)
 
-> Version: v1.1 (revised per review: paths unified with the `src/` prefix, event wording de-thought-ified) ｜ Basis: docs/ENVIRONMENT_AUDIT.md §3 (subagents are session-scoped task instances)
+> Version: v1.1 (revised per review: paths unified with the `src/` prefix, event wording de-thought-ified) ｜ Basis: the internal environment audit §3 (subagents are session-scoped task instances)
 >
 > **Implementation**: WorkBuddy natively supports spawning named subagents (a real, verified capability). The four roles are instantiated as **task-scoped subagents**: the Lead Orchestrator (the main session) creates tasks in the task list, then spawns role subagents to claim and execute them; subagents collaborate through the shared task list and handoff documents (`docs/handoff/`). Subagents are reclaimed when their task ends — **they are not resident processes**.
 
