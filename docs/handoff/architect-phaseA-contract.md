@@ -3,7 +3,8 @@
 > 作者：Architect Agent ｜ 状态：**冻结**（用户已批准 Phase A 启动；本文档为 Backend 实现的唯一契约依据，QA 验收以此处 PA-1~PA-14 条目为准）
 >
 > **修订记录**：
-> - **R1（2026-10-20，用户批准 PA-14 修复选项 A）**：修订 §5.1 `validate_experiment` 的 description 冻结文本——追加 ExperimentSpec 结构摘要与最小完整示例（PA-14 真实 LLM Demo 失败模式 B 的根因修复：宽松 `config: object` 输入导致模型在 tools schema 中不可见 spec 结构，只能盲猜错误包装）。修订范围**仅 description 文本**：不改 input_model、执行流程、输出结构、错误契约、算法与任何已验收行为。修订后实现须通过"示例经实际 ExperimentSpec 校验 valid=true"的一致性测试（见 §5.1 修订块）。基线 commit `45c42c1`（含本修订前的全部 Phase A 验收）。
+> - **R2（2026-10-20，用户批准诊断修复 F1）**：修订 §5.1 `validate_experiment` 的 description 冻结文本——R1 版（1385 字符，中文叙述 + 内嵌 JSON 示例）在 qwen2.5:7b + Ollama 0.40.6 上导致工具调用空响应（诊断报告 `docs/handoff/ollama-toolcall-diagnosis-report.md`：唯一与成败 100% 相关的变量是该 description 的 tools schema 形态）。R2 将 description 改为 **纯 ASCII、约 641 字符** 的紧凑版：保留结构说明（全部必需顶层键）+ 最小完整示例 + 反包装指令（"no wrapper"）。修订范围**仅 description 文本**：不改 input_model、执行流程、输出结构、错误契约、算法与任何已验收行为；generate_trials / export_experiment 的 description 不动。注意事项：本修订验证的是 F1 假设（description 形态与工具调用解析的兼容性），**不预断根因**——若复验仍失败，按诊断报告"无法确认"清单如实登记。
+> - **R1（2026-10-20，用户批准 PA-14 修复选项 A）**：修订 §5.1 `validate_experiment` 的 description 冻结文本——追加 ExperimentSpec 结构摘要与最小完整示例（PA-14 真实 LLM Demo 失败模式 B 的根因修复：宽松 `config: object` 输入导致模型在 tools schema 中不可见 spec 结构，只能盲猜错误包装）。修订范围**仅 description 文本**：不改 input_model、执行流程、输出结构、错误码、算法与任何已验收行为。修订后实现须通过"示例经实际 ExperimentSpec 校验 valid=true"的一致性测试（见 §5.1 修订块）。基线 commit `45c42c1`（含本修订前的全部 Phase A 验收）。R1 文本已被 R2 取代（保留于 git 历史）。
 > 上游依据：`docs/proposals/experiment-tools-design-proposal.md` v2.1（741 行，本契约从中裁剪出最小集）；`docs/handoff/architect-m1-contract.md`（M1 冻结契约，风格与错误回传模式沿用）
 > 基线：commit ae8dd68（M1 全部验收通过，含真实 LLM 全链路）
 > 产品边界（`.workbuddy/memory/MEMORY.md`，硬约束）：不兼容既有认知模型/实验项目；不为特定认知理论硬编码；不扩展为完整游戏引擎；不开发特定实验范式。**Phase A 纯通用路径（paradigm=null），不实现插件系统，不依赖 Stroop/N-back 或任何范式。**
@@ -316,30 +317,21 @@ class ValidateExperimentInput(BaseModel):
     config: dict[str, object]                      # ExperimentSpec 的 JSON 对象（LLM 直接内联生成）
     previous_errors: list[str] = Field(default_factory=list)  # 此前轮次 error_code:path 指纹列表（防死循环，§5.4）
 
-# ToolSpec 声明（冻结；R1 修订版——description 增补结构摘要与示例，其余字段不变）：
+# ToolSpec 声明（冻结；R2 修订版——description 为纯 ASCII 紧凑文本，其余字段不变）：
 ToolSpec(
     name="validate_experiment",
     description=(
-        "校验实验规格（ExperimentSpec JSON）的 schema 合法性与约束可满足性，"
-        "返回机器可读验证报告（错误含 error_code/path/suggestion）。修改 spec 后可重复调用。"
-        "config 的值必须就是 ExperimentSpec JSON 对象本身——顶层直接是 schema_version/name/seed 等字段，"
-        "禁止再包一层（不要包在 inputs、experimentSpec、config 等任何外层键内）。"
-        "必需顶层字段：schema_version(=1)、name、seed、paradigm(Phase A 必须为 null)、"
-        "paradigm_params(必须为 {})、factors(每项 {name, levels:[{name, weight?}]}，水平名因素内唯一)、"
-        "blocks(每项 {name, trial_count, factor_filter(默认 {}), shuffle_within(默认 true)}，块名唯一)、"
-        "constraints({balance?, ratios?, mutually_exclusive?})、"
-        "responses(每项 {name, kind(choice|text|rating), options(kind=choice 必填非空), "
-        "scale(kind=rating 必填 [min,max]), correct_from?(已声明的因素名)}，名唯一)、"
-        "timing({fixation_ms?, stimulus_ms?(null=直至响应), isi_ms?})。"
-        "最小完整示例（把 factors/levels/blocks/responses/timing/seed 换成任务要求的内容即可）："
-        '{"schema_version":1,"name":"example-cueing","version":"0.1.0","seed":7,"paradigm":null,'
-        '"paradigm_params":{},"factors":[{"name":"cue_type","levels":[{"name":"valid"},{"name":"invalid"}]},'
-        '{"name":"target_side","levels":[{"name":"left"},{"name":"right"}]}],'
-        '"blocks":[{"name":"practice","trial_count":4,"factor_filter":{},"shuffle_within":true},'
-        '{"name":"main","trial_count":40,"factor_filter":{},"shuffle_within":true}],'
+        "Validate ExperimentSpec JSON. config must be the spec object itself, no wrapper. "
+        "Top keys: schema_version(=1),name,seed,factors[{name,levels[{name}]}],"
+        "blocks[{name,trial_count}],constraints{balance},"
+        "responses[{name,kind,options,correct_from}],timing{fixation_ms,stimulus_ms,isi_ms}. "
+        "Minimal example: "
+        '{"schema_version":1,"name":"demo","seed":7,'
+        '"factors":[{"name":"item","levels":[{"name":"red"},{"name":"blue"}]}],'
+        '"blocks":[{"name":"main","trial_count":8}],'
         '"constraints":{"balance":true},'
-        '"responses":[{"name":"locate_target","kind":"choice","options":["left","right"],'
-        '"correct_from":"target_side"}],'
+        '"responses":[{"name":"pick","kind":"choice","options":["red","blue"],'
+        '"correct_from":"item"}],'
         '"timing":{"fixation_ms":400,"stimulus_ms":null,"isi_ms":800}}'
     ),
     input_model=ValidateExperimentInput,
@@ -349,11 +341,13 @@ ToolSpec(
 )
 ```
 
-**R1 修订约束（冻结）**：
-1. 示例 JSON 必须作为模块级常量（建议 `_SPEC_EXAMPLE_JSON: str`）嵌入 description，禁止实现与测试各抄一份（防漂移）；
-2. 一致性测试必须证明：`json.loads` 该示例 → `ExperimentSpec.model_validate` 通过 → `validate_spec` 返回 `valid=true` 且零错误零警告（示例与 Pydantic schema 及验证层逐字段一致的可执行证据）；
-3. 示例刻意与 PA-14 Demo goal 的任务**不同**（不同因素名/水平名/试次数）——示例职责是结构可发现性，不是替模型代答任务；模型仍须按 goal 真实构造自己的 spec 并完成 validate→generate→export 全链路；
-4. description 总长（含示例）软约束 ≤ 1600 字符，硬约束 ≤ 2400 字符（qwen2.5:7b ctx=8192 的 token 预算控制）。
+**R2 修订约束（冻结，取代 R1 修订约束 4 的长度口径）**：
+1. 示例 JSON 必须作为模块级常量（`_SPEC_EXAMPLE_JSON: str`）嵌入 description，禁止实现与测试各抄一份（防漂移）（沿用 R1 约束 1）；
+2. 一致性测试必须证明：`json.loads` 该示例 → `ExperimentSpec.model_validate` 通过 → `validate_spec` 返回 `valid=true` 且零错误零警告（沿用 R1 约束 2）；
+3. 示例刻意与 PA-14 Demo goal 的任务**不同**（沿用 R1 约束 3）；
+4. description 必须为**纯 ASCII**（`all(ord(c) < 128)`），总长（含示例）软约束 ≤ 700 字符、硬约束 ≤ 900 字符；
+5. 结构说明必须覆盖全部**必需**顶层键（schema_version/name/seed/factors/blocks/responses——timing 与 constraints 有默认值但示例中展示）；不得为字符预算省略必需字段的说明；
+6. 不得预断根因：R2 是对 F1 假设的受控验证，报告结论须区分"已证实的现象"与"推断"。
 
 **执行流程（冻结）**：
 1. 输入体积护栏：`config` 序列化字节 > 256KB → `ToolResult(ok=False, error="BLOCKED: config too large")`；

@@ -42,18 +42,18 @@ from src.tools._sandbox_io import SandboxBlocked, validate_sandbox_path, write_s
 MAX_CONFIG_BYTES = 256 * 1024  # config 输入体积护栏（§5.1）
 MAX_BUNDLE_BYTES = 1_048_576  # 1MB 导出上限（OUT-7 / R-6，与 file_write 同量级）
 
-# R1 修订（2026-10-20，用户批准 PA-14 修复选项 A）：validate_experiment description 内嵌的
-# ExperimentSpec 最小完整示例（契约 §5.1 R1 修订块冻结文本）。作为模块级常量单一来源，
+# R2 修订（2026-10-20，用户批准诊断修复 F1）：validate_experiment description 内嵌的
+# ExperimentSpec 最小完整示例（契约 §5.1 R2 修订块冻结文本）。作为模块级常量单一来源，
 # 测试与本 description 共用同一对象，防实现/测试各抄一份漂移。
+# R2 要求：纯 ASCII（诊断报告 F1——R1 中文长描述在 qwen2.5:7b + Ollama 0.40.6 上
+# 工具调用空响应，唯一相关变量是 description 的 schema 形态；本修订是对该假设的受控验证）。
 _SPEC_EXAMPLE_JSON = (
-    '{"schema_version":1,"name":"example-cueing","version":"0.1.0","seed":7,"paradigm":null,'
-    '"paradigm_params":{},"factors":[{"name":"cue_type","levels":[{"name":"valid"},{"name":"invalid"}]},'
-    '{"name":"target_side","levels":[{"name":"left"},{"name":"right"}]}],'
-    '"blocks":[{"name":"practice","trial_count":4,"factor_filter":{},"shuffle_within":true},'
-    '{"name":"main","trial_count":40,"factor_filter":{},"shuffle_within":true}],'
+    '{"schema_version":1,"name":"demo","seed":7,'
+    '"factors":[{"name":"item","levels":[{"name":"red"},{"name":"blue"}]}],'
+    '"blocks":[{"name":"main","trial_count":8}],'
     '"constraints":{"balance":true},'
-    '"responses":[{"name":"locate_target","kind":"choice","options":["left","right"],'
-    '"correct_from":"target_side"}],'
+    '"responses":[{"name":"pick","kind":"choice","options":["red","blue"],'
+    '"correct_from":"item"}],'
     '"timing":{"fixation_ms":400,"stimulus_ms":null,"isi_ms":800}}'
 )
 
@@ -210,18 +210,11 @@ def build_validate_spec(settings: Settings) -> ToolSpec:
     return ToolSpec(
         name="validate_experiment",
         description=(
-            "校验实验规格（ExperimentSpec JSON）的 schema 合法性与约束可满足性，"
-            "返回机器可读验证报告（错误含 error_code/path/suggestion）。修改 spec 后可重复调用。"
-            "config 的值必须就是 ExperimentSpec JSON 对象本身——顶层直接是 schema_version/name/seed 等字段，"
-            "禁止再包一层（不要包在 inputs、experimentSpec、config 等任何外层键内）。"
-            "必需顶层字段：schema_version(=1)、name、seed、paradigm(Phase A 必须为 null)、"
-            "paradigm_params(必须为 {})、factors(每项 {name, levels:[{name, weight?}]}，水平名因素内唯一)、"
-            "blocks(每项 {name, trial_count, factor_filter(默认 {}), shuffle_within(默认 true)}，块名唯一)、"
-            "constraints({balance?, ratios?, mutually_exclusive?})、"
-            "responses(每项 {name, kind(choice|text|rating), options(kind=choice 必填非空), "
-            "scale(kind=rating 必填 [min,max]), correct_from?(已声明的因素名)}，名唯一)、"
-            "timing({fixation_ms?, stimulus_ms?(null=直至响应), isi_ms?})。"
-            "最小完整示例（把 factors/levels/blocks/responses/timing/seed 换成任务要求的内容即可）："
+            "Validate ExperimentSpec JSON. config must be the spec object itself, no wrapper. "
+            "Top keys: schema_version(=1),name,seed,factors[{name,levels[{name}]}],"
+            "blocks[{name,trial_count}],constraints{balance},"
+            "responses[{name,kind,options,correct_from}],timing{fixation_ms,stimulus_ms,isi_ms}. "
+            "Minimal example: "
             + _SPEC_EXAMPLE_JSON
         ),
         input_model=ValidateExperimentInput,
