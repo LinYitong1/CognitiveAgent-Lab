@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     calc_agent_max_steps: int = 25
     http_allowed_hosts: str = "example.com"
     data_sandbox_dir: str = "data"
+    # SEARCH_EXHAUSTED 框架能力参数（契约 §4.2；Phase A 无消费路径，Phase B 序列约束消费）
+    experiment_max_search_attempts: int = 100
 
     @property
     def allowed_hosts(self) -> list[str]:

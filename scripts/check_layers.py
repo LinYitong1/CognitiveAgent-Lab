@@ -28,6 +28,7 @@ LAYER_ORDER: dict[str, int] = {
     "agent": 2,
     "tools": 3,
     "storage": 3,
+    "experiment": 4,  # Phase A 新增：tools 之下的实验引擎层（契约 §8.3 批准扩展）
 }
 
 # 共享层：仅被引用，不得引用任何业务层
