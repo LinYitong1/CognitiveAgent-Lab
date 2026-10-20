@@ -1,20 +1,20 @@
-"""确定性 HTML 游戏渲染器（Phase B 契约 §11，B2 冻结）。
+"""Deterministic HTML game renderer (Phase B contract §11, frozen in B2).
 
-职责铁律（契约 §11.1）：
-- render_game_html(bundle, game_spec) 为纯函数——同输入逐字节相同 HTML（§11.7）；
-- trials/条件/刺激/正确答案只来自 Bundle（防线 D-2：渲染器是 trials 唯一消费者）；
-- GameSpec 仅提供呈现参数：任何呈现字段变更不影响 trial steps（BR-4）。
+Core responsibilities (contract §11.1):
+- render_game_html(bundle, game_spec) is a pure function — same input → byte-identical HTML (§11.7);
+- trials/conditions/stimuli/correct answers come only from the Bundle (defense D-2: the renderer is the sole consumer of trials);
+- GameSpec only supplies presentation parameters: any presentation change leaves trial steps untouched (BR-4).
 
-安全（契约 §11.3）：
-- 动态文本一律 json.dumps(ensure_ascii=True) + '<'→'\\u003c' 嵌入 JS 字符串（防 </script> 逃逸）；
-- <title> 经 html.escape；模板组装用 split 交错（禁止链式 replace——防用户文本含占位符注入）；
-- 引擎 JS 仅 textContent/createElement；无 innerHTML/eval/document.write（BR-5 grep 断言）。
+Security (contract §11.3):
+- dynamic text is always embedded as json.dumps(ensure_ascii=True) + '<'→'\\u003c' inside JS strings (blocks </script> escape);
+- <title> goes through html.escape; template assembly uses split interleaving (chained replace is forbidden — blocks placeholder injection via user text);
+- the engine JS uses textContent/createElement only; no innerHTML/eval/document.write (BR-5 grep assertion).
 
-启动完整性（契约 §11.4，防线 D-3）：HTML 内嵌纯 JS SHA-256 实现（零依赖），
-启动时校验 BUNDLE_CANONICAL / TRIALS_CANONICAL 两指纹，任一失配拒绝启动。
+Startup integrity (contract §11.4, defense D-3): the HTML embeds a pure-JS SHA-256 implementation (zero dependencies);
+at startup it verifies the BUNDLE_CANONICAL / TRIALS_CANONICAL fingerprints and refuses to start on any mismatch.
 
-计时精度（契约 §11.9）：浏览器 setTimeout 调度为近似值——footer 与结束屏
-双处固定声明，不宣称毫秒级精度，不用于正式数据收集。
+Timing precision (contract §11.9): browser setTimeout scheduling is approximate — stated verbatim in both
+the footer and the end screen; no millisecond precision is claimed; not for formal data collection.
 """
 
 from __future__ import annotations
@@ -26,32 +26,32 @@ from typing import cast
 from src.experiment.canonical import canonical_json
 from src.experiment.game_schemas import GameSpec
 
-MAX_RENDERED_HTML_BYTES = 1_048_576  # 渲染产物护栏（§11.8，与 export 同量级）
+MAX_RENDERED_HTML_BYTES = 1_048_576  # rendered-output guard (§11.8, same order as export)
 
 
 # ---------------------------------------------------------------------------
-# 嵌入转义（§11.3）
+# Embedding escapes (§11.3)
 # ---------------------------------------------------------------------------
 
 def _js_string(text: str) -> str:
-    """文本 → JS 字符串字面量：ensure_ascii 全转义 + '<'→'\\u003c'（防 </script> 逃逸）。"""
+    """Text → JS string literal: full ensure_ascii escaping + '<'→'\\u003c' (blocks </script> escape)."""
     return json.dumps(text, ensure_ascii=True).replace("<", "\\u003c")
 
 
 def _compact_json(obj: object) -> str:
-    """确定性紧凑 JSON 文本（键排序；仅作为待嵌入的纯文本，非安全边界）。"""
+    """Deterministic compact JSON text (sorted keys; pure text to be embedded, not a security boundary)."""
     return json.dumps(obj, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
 # ---------------------------------------------------------------------------
-# 运行计划（§11.2）
+# Run plan (§11.2)
 # ---------------------------------------------------------------------------
 
 def build_run_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[str, object]:
-    """从 Bundle + GameSpec 构建运行计划（纯函数；状态机与数据完整性的可测载体）。
+    """Build the run plan from Bundle + GameSpec (pure function; the testable carrier of the state machine and data integrity).
 
-    确定性：所有 dict 迭代来源为 list 序（spec 声明序 / trials 序）或排序键
-    （stimulus 键字典序）——hash-seed 无关。
+    Determinism: every dict iteration comes from list order (spec declaration order / trials order) or sorted
+    keys (lexicographic stimulus keys) — independent of the hash seed.
     """
     spec = cast(dict[str, object], bundle["spec"])
     trials = cast(list[object], bundle["trials"])
@@ -95,14 +95,14 @@ def build_run_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[str, 
                 }
             )
         prev_block = block
-        # 呈现内容：因素按 spec 声明序 + stimulus 键按字典序（确定性）
+        # Presentation: factors in spec declaration order + stimulus keys in lexicographic order (deterministic)
         display: list[list[object]] = [
             [name, factors[name]] for name in factor_order if name in factors
         ]
         stimulus = trial.get("stimulus")
         if isinstance(stimulus, dict):
             display.extend([key, stimulus[key]] for key in sorted(stimulus))
-        # 正确答案：只来自 Bundle（trial.factors[correct_from]，§11.2）
+        # Correct answers: only from the Bundle (trial.factors[correct_from], §11.2)
         correct: dict[str, object] = {}
         for resp in responses:
             correct_from = resp["correct_from"]
@@ -119,7 +119,7 @@ def build_run_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[str, 
             }
         )
 
-    # end step 恒存在（事件日志必须可导出）；summary 标志控制统计区（§11.2）
+    # the end step always exists (the event log must stay exportable); the summary flag controls the stats section (§11.2)
     steps.append({"type": "end", "summary": game_spec.flow.end_screen == "summary"})
 
     bindings: dict[str, dict[str, str]] = {
@@ -159,15 +159,15 @@ def build_run_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[str, 
 
 
 # ---------------------------------------------------------------------------
-# 渲染（§11.3 / §11.4 / §11.7）
+# Rendering (§11.3 / §11.4 / §11.7)
 # ---------------------------------------------------------------------------
 
 def render_game_html(bundle: dict[str, object], game_spec: GameSpec) -> str:
-    """渲染单文件可玩 HTML（纯函数：同 Bundle + GameSpec → 逐字节相同输出）。"""
+    """Render the single-file playable HTML (pure function: same Bundle + GameSpec → byte-identical output)."""
     plan = build_run_plan(bundle, game_spec)
     plan_text = _compact_json(plan)
 
-    # 完整性锚点（§11.4）：与 Phase A 指纹计算口径逐字节一致
+    # Integrity anchors (§11.4): byte-identical to the Phase A fingerprint computation
     trials_canonical = canonical_json(bundle["trials"])
     stripped = {
         key: value
@@ -198,7 +198,7 @@ def render_game_html(bundle: dict[str, object], game_spec: GameSpec) -> str:
 
 
 def _split_once(template: str, placeholder: str) -> tuple[str, str]:
-    """按占位符切分模板（每个占位符必须恰好出现一次；内容永不回扫——防注入）。"""
+    """Split the template at the placeholder (each must occur exactly once; content is never re-scanned — blocks injection)."""
     parts = template.split(placeholder)
     if len(parts) != 2:
         raise ValueError(f"template placeholder {placeholder!r} expected exactly once")
@@ -213,7 +213,7 @@ def _assemble(title: str, body_class: str, data_script: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 内嵌 JS：SHA-256 实现（标准算法，零依赖；node 可独立执行验证——BR-8）
+# Embedded JS: SHA-256 implementation (standard algorithm, zero dependencies; independently runnable under node — BR-8)
 # ---------------------------------------------------------------------------
 
 _SHA256_JS = """\
@@ -289,7 +289,7 @@ var integrity = (function () {
 
 
 # ---------------------------------------------------------------------------
-# HTML 模板（静态骨架 + 引擎 JS；安全契约：引擎仅 textContent/createElement）
+# HTML template (static skeleton + engine JS; security contract: the engine uses textContent/createElement only)
 # ---------------------------------------------------------------------------
 
 _ENGINE_JS = """\

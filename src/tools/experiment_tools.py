@@ -1,14 +1,14 @@
-"""实验三工具：validate_experiment / generate_trials / export_experiment（契约 §5）。
+"""The three experiment tools: validate_experiment / generate_trials / export_experiment (contract §5).
 
-风格对齐 calc.py / file_write.py：Input 模型 + 内部 _ExperimentBlocked 异常 +
-BLOCKED: 前缀 + build_*(settings) -> ToolSpec 工厂。
+Style aligned with calc.py / file_write.py: Input model + internal _ExperimentBlocked exception +
+BLOCKED: prefix + build_*(settings) -> ToolSpec factories.
 
-两级错误契约（§5.4）：
-- 工具级失败（输入非 dict、序列化失败、安全拒绝等基础设施错误）→ ok=False；
-- 领域级失败（spec 问题）→ 永远 ok=True + valid:false（回传 LLM 不带 ERROR: 前缀）。
+Two-tier error contract (§5.4):
+- tool-level failure (non-dict input, serialization failure, security refusal and other infrastructure errors) → ok=False;
+- domain-level failure (spec problems) → always ok=True + valid:false (returned to the LLM without the ERROR: prefix).
 
-护栏：config 序列化字节 > 256KB → BLOCKED: config too large（三工具同守）；
-export 的 canonical bundle 字节 > 1MB → BLOCKED: export too large（OUT-7 / R-6）。
+Guards: config serialized bytes > 256KB → BLOCKED: config too large (shared by all three tools);
+export's canonical bundle bytes > 1MB → BLOCKED: export too large (OUT-7 / R-6).
 """
 
 from __future__ import annotations
@@ -39,14 +39,14 @@ from src.models.tool_result import ToolResult
 from src.models.tool_spec import ToolSpec
 from src.tools._sandbox_io import SandboxBlocked, validate_sandbox_path, write_sandbox_file
 
-MAX_CONFIG_BYTES = 256 * 1024  # config 输入体积护栏（§5.1）
-MAX_BUNDLE_BYTES = 1_048_576  # 1MB 导出上限（OUT-7 / R-6，与 file_write 同量级）
+MAX_CONFIG_BYTES = 256 * 1024  # config input size guard (§5.1)
+MAX_BUNDLE_BYTES = 1_048_576  # 1MB export cap (OUT-7 / R-6, same order as file_write)
 
-# R2 修订（2026-10-20，用户批准诊断修复 F1）：validate_experiment description 内嵌的
-# ExperimentSpec 最小完整示例（契约 §5.1 R2 修订块冻结文本）。作为模块级常量单一来源，
-# 测试与本 description 共用同一对象，防实现/测试各抄一份漂移。
-# R2 要求：纯 ASCII（诊断报告 F1——R1 中文长描述在 qwen2.5:7b + Ollama 0.40.6 上
-# 工具调用空响应，唯一相关变量是 description 的 schema 形态；本修订是对该假设的受控验证）。
+# R2 revision (2026-10-20, user-approved diagnostic fix F1): the minimal complete ExperimentSpec example
+# embedded in the validate_experiment description (frozen text of the contract §5.1 R2 revision block). A module-level
+# constant as the single source; tests share this object with the description to prevent drift.
+# R2 requirement: pure ASCII (diagnosis report F1 — the R1 long Chinese description caused empty tool-call
+# outputs on qwen2.5:7b + Ollama 0.40.6; the sole correlating variable was the schema form of the description; this revision is a controlled test of that hypothesis).
 _SPEC_EXAMPLE_JSON = (
     '{"schema_version":1,"name":"demo","seed":7,'
     '"factors":[{"name":"item","levels":[{"name":"red"},{"name":"blue"}]}],'
@@ -61,32 +61,32 @@ _GENERATE_NOTE = "full sequence reproducible via export_experiment with identica
 
 
 class _ExperimentBlocked(Exception):
-    """工具级安全/护栏拒绝（→ BLOCKED: 前缀）。"""
+    """Tool-level security/guard refusal (→ BLOCKED: prefix)."""
 
 
 class ValidateExperimentInput(BaseModel):
-    """validate_experiment 参数（契约 §5.1）。"""
+    """validate_experiment arguments (contract §5.1)."""
 
-    config: dict[str, object]  # ExperimentSpec 的 JSON 对象（LLM 直接内联生成）
-    previous_errors: list[str] = Field(default_factory=list)  # 此前轮次 error_code:path 指纹列表
+    config: dict[str, object]  # the ExperimentSpec JSON object (generated inline by the LLM)
+    previous_errors: list[str] = Field(default_factory=list)  # error_code:path fingerprints of previous rounds
 
 
 class GenerateTrialsInput(BaseModel):
-    """generate_trials 参数（契约 §5.2）。"""
+    """generate_trials arguments (contract §5.2)."""
 
     config: dict[str, object]
-    max_preview_trials: int = Field(default=8, ge=0, le=50)  # 回传 LLM 的试次预览条数
+    max_preview_trials: int = Field(default=8, ge=0, le=50)  # number of preview trials returned to the LLM
 
 
 class ExportExperimentInput(BaseModel):
-    """export_experiment 参数（契约 §5.3）。"""
+    """export_experiment arguments (contract §5.3)."""
 
     config: dict[str, object]
-    path: str = Field(min_length=1)  # 相对 data/ 沙箱根的输出路径
+    path: str = Field(min_length=1)  # output path relative to the data/ sandbox root
 
 
 def _config_size_guard(config: dict[str, object]) -> None:
-    """输入体积护栏：config 序列化字节 > 256KB → 拒绝（§5.1 第 1 步）。"""
+    """Input size guard: config serialized bytes > 256KB → refuse (§5.1 step 1)."""
     try:
         size = len(json.dumps(config, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     except (TypeError, ValueError) as exc:
@@ -96,7 +96,7 @@ def _config_size_guard(config: dict[str, object]) -> None:
 
 
 def _validation_payload(result: ValidationResult, stalled: bool) -> dict[str, object]:
-    """验证报告 JSON（§5.1 输出结构；generate 失败路径与其同构）。"""
+    """Validation report JSON (§5.1 output structure; the generate failure path is isomorphic)."""
     return {
         "valid": result.valid,
         "stalled": stalled,
@@ -110,14 +110,14 @@ def _validation_payload(result: ValidationResult, stalled: bool) -> dict[str, ob
 
 
 def _invalid_spec_result(result: ValidationResult) -> ToolResult:
-    """领域级失败：ok=True + valid:false（不带 ERROR: 前缀，§5.4）。"""
+    """Domain-level failure: ok=True + valid:false (no ERROR: prefix, §5.4)."""
     return ToolResult(ok=True, result=canonical_json(_validation_payload(result, False)))
 
 
 def _stalled_check(
     result: ValidationResult, previous_errors: list[str]
 ) -> tuple[bool, list[ValidationIssue]]:
-    """stalled 判定（§5.1 第 3 步）：任一当次指纹在 previous_errors 出现 ≥2 次。"""
+    """Stalled decision (§5.1 step 3): any current fingerprint appearing ≥2 times in previous_errors."""
     repeated = stalled_fingerprints(result.errors, previous_errors)
     if not repeated:
         return False, list(result.errors)
@@ -150,7 +150,7 @@ async def _execute_generate(
         return ToolResult(ok=False, error=f"BLOCKED: {exc}")
     result = validate_spec(args.config)
     if not result.valid or result.spec is None:
-        return _invalid_spec_result(result)  # 验证失败不生成（§5.2）
+        return _invalid_spec_result(result)  # never generate from an invalid spec (§5.2)
     spec = result.spec
     generated = generate_trials(spec, max_attempts=max_attempts)
     frequency = compute_frequency(spec, generated.trials)
@@ -179,9 +179,9 @@ async def _execute_export(args: ExportExperimentInput, sandbox: Path) -> ToolRes
         return ToolResult(ok=False, error=f"BLOCKED: {exc}")
     result = validate_spec(args.config)
     if not result.valid or result.spec is None:
-        return _invalid_spec_result(result)  # 不导出无效实验（§5.3 第 2 步）
+        return _invalid_spec_result(result)  # never export an invalid experiment (§5.3 step 2)
     spec = result.spec
-    # export 内部重新确定性生成（关键裁定：不接受 generate 的输出，§5.3）
+    # export deterministically regenerates internally (key ruling: generate's output is not accepted, §5.3)
     bundle = build_bundle(spec)
     text = canonical_json(bundle)
     data = text.encode("utf-8")
@@ -203,7 +203,7 @@ async def _execute_export(args: ExportExperimentInput, sandbox: Path) -> ToolRes
 
 
 def build_validate_spec(settings: Settings) -> ToolSpec:
-    """构造 validate_experiment 的 ToolSpec（幂等、只读、low）。"""
+    """Build validate_experiment's ToolSpec (idempotent, read-only, low)."""
     async def executor(base: Any) -> ToolResult:
         return await _execute_validate(cast(ValidateExperimentInput, base))
 
@@ -225,8 +225,8 @@ def build_validate_spec(settings: Settings) -> ToolSpec:
 
 
 def build_generate_spec(settings: Settings) -> ToolSpec:
-    """构造 generate_trials 的 ToolSpec（幂等、纯函数、不落盘、low）。"""
-    max_attempts = settings.experiment_max_search_attempts  # SEARCH_EXHAUSTED 框架能力参数（§4.2）
+    """Build generate_trials's ToolSpec (idempotent, pure function, no disk writes, low)."""
+    max_attempts = settings.experiment_max_search_attempts  # SEARCH_EXHAUSTED framework capability parameter (§4.2)
 
     async def executor(base: Any) -> ToolResult:
         return await _execute_generate(cast(GenerateTrialsInput, base), max_attempts)
@@ -234,9 +234,9 @@ def build_generate_spec(settings: Settings) -> ToolSpec:
     return ToolSpec(
         name="generate_trials",
         description=(
-            "按实验规格确定性生成完整试次序列（同 spec+seed 结果逐字节相同）。返回序列指纹与"
-            "各因素水平频数统计，供核对设计意图；不写任何文件。完整序列由 export_experiment 用"
-            "同一 spec+seed 确定性重新生成并落盘。"
+            "Deterministically generate the full trial sequence from the experiment spec (the same spec+seed yields "
+            "byte-identical results). Returns the sequence fingerprint and per-factor level frequencies for design "
+            "review; writes no files. export_experiment regenerates and writes the full sequence from the same spec+seed."
         ),
         input_model=GenerateTrialsInput,
         idempotency="idempotent",
@@ -246,7 +246,7 @@ def build_generate_spec(settings: Settings) -> ToolSpec:
 
 
 def build_export_spec(settings: Settings) -> ToolSpec:
-    """构造 export_experiment 的 ToolSpec（非幂等、落盘、medium）。"""
+    """Build export_experiment's ToolSpec (non-idempotent, writes to disk, medium)."""
     sandbox = Path(settings.data_sandbox_dir)
 
     async def executor(base: Any) -> ToolResult:
@@ -255,8 +255,8 @@ def build_export_spec(settings: Settings) -> ToolSpec:
     return ToolSpec(
         name="export_experiment",
         description=(
-            "把实验规格物化为自包含实验导出包（ExperimentBundle：规范化 spec + 全量试次 + 可重复性"
-            "元数据 + SHA-256 完整性指纹），写入 data/ 沙箱内指定路径（覆盖已存在文件）。"
+            "Materialize the experiment spec into a self-contained ExperimentBundle (normalized spec + full trials "
+            "+ reproducibility metadata + SHA-256 integrity fingerprint) and write it to the given path inside the data/ sandbox (overwrites existing files)."
         ),
         input_model=ExportExperimentInput,
         idempotency="non-idempotent",

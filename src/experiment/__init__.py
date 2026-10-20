@@ -1,14 +1,14 @@
-"""experiment 包：Phase A 通用实验引擎（契约 docs/handoff/architect-phaseA-contract.md）。
+"""experiment package: the Phase A generic experiment engine (contract docs/handoff/architect-phaseA-contract.md).
 
-模块组成：
-- schemas.py      ExperimentSpec 全层级 Pydantic 模型（契约 §2 字段表 + V1~V9）
-- canonical.py    canonical JSON 序列化与 SHA-256 指纹（契约 §6.1/§6.3）
-- validation.py   约束语义验证与错误码枚举（契约 §4）
-- generation.py   确定性生成引擎（契约 §3 九步算法）
-- export.py       ExperimentBundle 组装（契约 §6.2）
-- verify.py       免生成器独立验证 CLI（契约 §6.4）
+Module composition:
+- schemas.py      full-hierarchy Pydantic models for ExperimentSpec (contract §2 field table + V1~V9)
+- canonical.py    canonical JSON serialization and SHA-256 fingerprints (contract §6.1/§6.3)
+- validation.py   constraint-semantics validation and error-code enums (contract §4)
+- generation.py   deterministic generation engine (contract §3 nine-step algorithm)
+- export.py       ExperimentBundle assembly (contract §6.2)
+- verify.py       generator-free independent verification CLI (contract §6.4)
 
-分层（契约 §8.4）：experiment 层只依赖 src/models、src/config 与标准库；
-禁止 import src.agent / src.tools / src.api / src.services / src.storage。
-组合注册入口位于 src/agent/experiment_registry.py（agent 层，契约 §5.4）。
+Layering (contract §8.4): the experiment layer depends only on src/models, src/config and the stdlib;
+importing src.agent / src.tools / src.api / src.services / src.storage is forbidden.
+The combinator registration entry lives at src/agent/experiment_registry.py (agent layer, contract §5.4).
 """

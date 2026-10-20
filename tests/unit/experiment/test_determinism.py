@@ -1,9 +1,9 @@
-"""PA-2 确定性测试（契约 §7；-k "determin or cross_ or isolation or regenerate" 命中）。
+"""PA-2 determinism tests (contract §7; matched by -k "determin or cross_ or isolation or regenerate").
 
-- 同进程两次 canonical 全等；
-- 子进程 PYTHONHASHSEED=1/=2 输出 diff 为空（§3.4 验证方法）；
-- block 隔离（子流派生键 = block.name）；
-- 同 spec+seed 两次 build_bundle 剥离 generated_at 后逐字节相同。
+- two runs in the same process produce identical canonical output;
+- subprocess outputs with PYTHONHASHSEED=1/=2 have an empty diff (§3.4 verification method);
+- block isolation (the block-derivation key = block.name);
+- two build_bundle runs with the same spec+seed are byte-identical after stripping generated_at.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def test_generation_same_seed_byte_identical() -> None:
 
 
 def test_generation_cross_pythonhashseed() -> None:
-    """子进程 PYTHONHASHSEED=1 / =2 各生成一次，输出 diff 为空（§3.4 第 6 条）。"""
+    """Generate once per subprocess with PYTHONHASHSEED=1 / =2; the output diff is empty (§3.4 item 6)."""
     outputs: list[str] = []
     for hashseed in ("1", "2"):
         env = dict(os.environ, PYTHONHASHSEED=hashseed)
@@ -80,15 +80,15 @@ def test_generation_cross_pythonhashseed() -> None:
         )
         assert proc.returncode == 0, proc.stderr
         outputs.append(proc.stdout)
-    assert outputs[0] == outputs[1], "PYTHONHASHSEED 不同的两次生成输出应逐字节一致"
+    assert outputs[0] == outputs[1], "two runs with different PYTHONHASHSEED must produce byte-identical output"
 
 
 def test_block_isolation() -> None:
-    """增删/插入 block 不扰动其他 block 的序列（子流派生键 = block.name）。"""
+    """Appending/removing/inserting blocks does not disturb other blocks' sequences (block-derivation key = block.name)."""
     base = _spec()  # blocks: practice(8), main(40)
     base_gen = generate_trials(base)
 
-    # 尾部追加新 block：既有 block 的试次（含全局 index）逐字节不变
+# append a new block at the tail: existing blocks' trials (incl. global index) stay byte-identical
     with_extra = base.model_copy(deep=True)
     extra_block = base.blocks[0].model_copy(deep=True)
     extra_block.name = "extra"
@@ -98,7 +98,7 @@ def test_block_isolation() -> None:
         [t.model_dump() for t in extra_gen.trials[: len(base_gen.trials)]]
     )
 
-    # 中间插入新 block：既有 block 的试次内容（剥离全局 index）逐字节不变
+# insert a new block in the middle: existing blocks' trial content (global index stripped) stays byte-identical
     with_middle = base.model_copy(deep=True)
     middle_block = base.blocks[0].model_copy(deep=True)
     middle_block.name = "middle"
@@ -117,7 +117,7 @@ def test_block_isolation() -> None:
 
 
 def test_regenerate_bundle_identical() -> None:
-    """同 spec+seed 两次 build_bundle，剥离 generated_at 后逐字节相同（含 bundle_sha256）。"""
+    """Two build_bundle runs with the same spec+seed are byte-identical after stripping generated_at (incl. bundle_sha256)."""
     first = build_bundle(_spec(), generated_at="2026-01-01T00:00:00Z")
     second = build_bundle(_spec(), generated_at="2027-12-31T23:59:59Z")
     strip = lambda bundle: {  # noqa: E731

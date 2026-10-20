@@ -1,7 +1,7 @@
-"""M1-5 http_request 单元测试（契约 §3.2；-k tool_security 命中）。
+"""M1-5 http_request unit tests (contract §3.2; matched by -k tool_security).
 
-不真正联网：FakeResolver + FakeConnector（reader/writer 假流）注入，
-真实 GET 只测被阻断路径（安全校验逻辑全量覆盖）。
+No real network: FakeResolver + FakeConnector (fake reader/writer streams) are injected;
+real GET is only tested on blocked paths (the security-validation logic is fully covered).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from src.tools import http_request
 
 
 class FakeResolver:
-    """每次调用依次返回预设结果（模拟 rebinding：第二次与第一次不同）。"""
+    """Returns the preset results one per call (simulating rebinding: the second differs from the first)."""
 
     def __init__(self, *results: list[str]) -> None:
         self._results = [list(r) for r in results]
@@ -30,7 +30,7 @@ class FakeResolver:
 
 
 class FakeReader:
-    """最小读取接口（http_request.Reader 协议的结构实现）。"""
+    """Minimal read interface (a structural implementation of the http_request.Reader protocol)."""
 
     def __init__(self, data: bytes) -> None:
         self._data = data
@@ -56,7 +56,7 @@ class FakeReader:
 
 
 class FakeWriter:
-    """最小写入接口（记录写入内容供断言）。"""
+    """Minimal write interface (records what was written for assertions)."""
 
     def __init__(self) -> None:
         self.written: list[bytes] = []
@@ -76,7 +76,7 @@ class FakeWriter:
 
 
 class RecordingConnector:
-    """记录每次连接参数（IP/端口/TLS/SNI），按次返回预设原始响应。"""
+    """Records the connect parameters of each call (IP/port/TLS/SNI); returns the preset raw responses per call."""
 
     def __init__(self, responses: list[bytes]) -> None:
         self._responses = list(responses)
@@ -123,15 +123,15 @@ async def test_http_allows_whitelisted_public_host() -> None:
     assert result.ok
     assert "status: 200" in result.result
     assert "hello example" in result.result
-    # resolve-then-connect 生效证据：连接目标 == 已校验 IP，且无二次解析
+    # evidence that resolve-then-connect works: the connect target == the validated IP, with no second resolution
     assert len(resolver.calls) == 1
     ip, port, tls, sni = connector.connections[0]
     assert ip == "93.184.216.34"
     assert port == 443
-    # HTTPS：SNI/证书校验以原域名进行（server_hostname 分离）
+    # HTTPS: SNI/certificate validation against the original hostname (server_hostname separated)
     assert tls is True
     assert sni == "example.com"
-    # Host 头保留原域名
+    # the Host header keeps the original hostname
     assert b"Host: example.com\r\n" in connector.writers[0].written[0]
 
 
@@ -145,13 +145,13 @@ async def test_http_blocks_private_ip(private_ip: str) -> None:
 
     assert not result.ok
     assert result.error.startswith("BLOCKED")
-    assert connector.connections == []  # 未建连
+    assert connector.connections == []  # no connection made
 
 
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_blocks_cloud_metadata() -> None:
-    # IP 字面量直填（进入白名单后由 IP 校验阻断——云元数据 169.254.169.254）
+    # an IP literal goes straight in (blocked by IP validation after passing the allow-list — cloud metadata 169.254.169.254)
     resolver = FakeResolver(["169.254.169.254"])
     connector = RecordingConnector([])
     result = await _run(
@@ -187,13 +187,13 @@ async def test_http_blocks_non_whitelisted_host() -> None:
 
     assert not result.ok
     assert result.error.startswith("BLOCKED")
-    assert resolver.calls == []  # 白名单先于 DNS
+    assert resolver.calls == []  # the allow-list check precedes DNS
 
 
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_blocks_mixed_dns_records() -> None:
-    resolver = FakeResolver(["93.184.216.34", "10.0.0.1"])  # 多记录含私有 → 整条拒绝
+    resolver = FakeResolver(["93.184.216.34", "10.0.0.1"])  # multiple records incl. a private one → the whole set is rejected
     connector = RecordingConnector([])
     result = await _run("http://example.com/", resolver=resolver, connector=connector)
 
@@ -213,7 +213,7 @@ async def test_http_blocks_redirect_to_private() -> None:
 
     assert not result.ok
     assert result.error.startswith("BLOCKED")
-    assert len(connector.connections) == 1  # 第二跳未建连（重新走完整链路时被拒）
+    assert len(connector.connections) == 1  # the second hop never connects (rejected when re-running the full chain)
 
 
 @pytest.mark.asyncio
@@ -228,21 +228,21 @@ async def test_http_blocks_redirect_loop_and_limit() -> None:
     assert not result.ok
     assert result.error.startswith("BLOCKED")
     assert "redirect" in result.error
-    # 初始请求 + 3 跳 = 4 次连接，之后超限
+    # the initial request + 3 hops = 4 connections; beyond that the limit trips
     assert len(connector.connections) == 4
 
 
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_dns_rebinding_fake_resolver() -> None:
-    # 第一次解析公网、第二次私有——若实现存在二次解析（TOCTOU）将得逞
+    # the first resolution returns a public IP, the second a private one — an implementation with a second resolution (TOCTOU) would succeed
     resolver = FakeResolver(["93.184.216.34"], ["10.0.0.1"])
     connector = RecordingConnector([_response(200, b"stable")])
     result = await _run("http://example.com/", resolver=resolver, connector=connector)
 
     assert result.ok
-    assert len(resolver.calls) == 1  # 仅解析一次
-    assert connector.connections[0][0] == "93.184.216.34"  # 连接 IP == 首次校验值
+    assert len(resolver.calls) == 1  # resolved exactly once
+    assert connector.connections[0][0] == "93.184.216.34"  # the connected IP == the first validated value
 
 
 @pytest.mark.asyncio
@@ -255,14 +255,14 @@ async def test_http_response_size_truncation() -> None:
 
     assert result.ok
     assert "truncated: true" in result.result
-    # body 截断到 1MB
+    # body truncated to 1MB
     body_line = next(line for line in result.result.splitlines() if line.startswith("body: "))
     assert len(body_line) == len("body: ") + http_request.MAX_BODY_BYTES
 
 
 @pytest.mark.tool_security
 def test_http_idempotency_declarations() -> None:
-    """幂等性声明与调用级覆写（ARCHITECTURE §6.4；M2 恢复语义的快照依据）。"""
+    """Idempotency declarations and the call-level override (ARCHITECTURE §6.4; the snapshot basis for M2 recovery semantics)."""
     from src.tools import calc, file_write
 
     settings = Settings()
@@ -271,25 +271,25 @@ def test_http_idempotency_declarations() -> None:
 
     http_spec = http_request.build_tool_spec(settings)
     assert http_spec.idempotency == "non-idempotent"
-    assert http_spec.effective_idempotency({"method": "GET"}) == "idempotent"  # GET 覆写
-    assert http_spec.effective_idempotency({}) == "idempotent"  # 缺省 method 即 GET
+    assert http_spec.effective_idempotency({"method": "GET"}) == "idempotent"  # GET override
+    assert http_spec.effective_idempotency({}) == "idempotent"  # an omitted method means GET
     assert http_spec.effective_idempotency({"method": "POST"}) == "non-idempotent"
 
 
 # ---------------------------------------------------------------------------
-# G-2 退回补测（qa-M1.md §三）：chunked / EOF / 畸形响应 / URL 错误 / 连接异常 / 超时
+# G-2 regression supplements (qa-M1.md §3): chunked / EOF / malformed responses / URL errors / connection exceptions / timeouts
 # ---------------------------------------------------------------------------
 
 
 def _chunked_payload(chunks: list[bytes]) -> bytes:
-    """构造 chunked 编码的响应体字节流。"""
+    """Build a chunked-encoded response body byte stream."""
     return b"".join(b"%x\r\n%s\r\n" % (len(chunk), chunk) for chunk in chunks) + b"0\r\n\r\n"
 
 
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_reads_chunked_body() -> None:
-    """chunked 传输编码：多 chunk 正常拼接，无截断。"""
+    """Chunked transfer-encoding: multiple chunks concatenate correctly, no truncation."""
     raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + _chunked_payload(
         [b"hello ", b"chunked ", b"world"]
     )
@@ -305,7 +305,7 @@ async def test_http_reads_chunked_body() -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_chunked_truncation() -> None:
-    """chunked 超 1MB：截断至 1MB 并标注 truncated。"""
+    """Chunked over 1MB: truncated to 1MB and marked truncated."""
     raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + _chunked_payload(
         [b"x" * 600_000, b"y" * 600_000]
     )
@@ -322,7 +322,7 @@ async def test_http_chunked_truncation() -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_reads_body_to_eof() -> None:
-    """无 content-length / transfer-encoding：读至连接 EOF；请求行携带 path?query。"""
+    """No content-length / transfer-encoding: read to connection EOF; the request line carries path?query."""
     raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nno length headers here"
     resolver = FakeResolver(["93.184.216.34"])
     connector = RecordingConnector([raw])
@@ -331,14 +331,14 @@ async def test_http_reads_body_to_eof() -> None:
     assert result.ok
     assert "body: no length headers here" in result.result
     assert "truncated" not in result.result
-    # 请求行含完整 path?query（L153 分支）
+    # the request line carries the full path?query (the L153 branch)
     assert b"GET /path?q=1 HTTP/1.1\r\n" in connector.writers[0].written[0]
 
 
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_eof_truncation() -> None:
-    """EOF 模式超 1MB：截断至 1MB 并标注 truncated。"""
+    """EOF mode over 1MB: truncated to 1MB and marked truncated."""
     raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n" + b"z" * (
         http_request.MAX_BODY_BYTES + 100
     )
@@ -357,13 +357,13 @@ async def test_http_eof_truncation() -> None:
 @pytest.mark.parametrize(
     "raw",
     [
-        b"",  # 空响应
-        b"GARBAGE\r\n\r\n",  # 状态行缺状态码
-        b"HTTP/1.1 NOT_A_NUMBER OK\r\n\r\n",  # 状态码非数字
+        b"",  # empty response
+        b"GARBAGE\r\n\r\n",  # the status line lacks a status code
+        b"HTTP/1.1 NOT_A_NUMBER OK\r\n\r\n",  # the status code is not numeric
     ],
 )
 async def test_http_rejects_malformed_status_line(raw: bytes) -> None:
-    """畸形状态行 → 功能错误（非 BLOCKED）回传。"""
+    """A malformed status line → a functional error (not BLOCKED) is returned."""
     resolver = FakeResolver(["93.184.216.34"])
     connector = RecordingConnector([raw])
     result = await _run("http://example.com/", resolver=resolver, connector=connector)
@@ -376,7 +376,7 @@ async def test_http_rejects_malformed_status_line(raw: bytes) -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_rejects_malformed_content_length() -> None:
-    """content-length 非数字 → malformed content-length。"""
+    """A non-numeric content-length → malformed content-length."""
     raw = b"HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\nhello"
     resolver = FakeResolver(["93.184.216.34"])
     connector = RecordingConnector([raw])
@@ -392,14 +392,14 @@ async def test_http_rejects_malformed_content_length() -> None:
     "url, reason",
     [
         ("ftp://example.com/", "scheme not allowed"),
-        ("example.com/path", "scheme not allowed"),  # 无 scheme
+        ("example.com/path", "scheme not allowed"),  # no scheme
         ("http://", "no hostname"),
         ("http://user:pass@example.com/", "userinfo not allowed"),
-        ("http://example.com:99999999999999999999/", "invalid URL"),  # 端口超范围
+        ("http://example.com:99999999999999999999/", "invalid URL"),  # port out of range
     ],
 )
 async def test_http_rejects_bad_urls(url: str, reason: str) -> None:
-    """URL 解析错误分支：scheme/hostname/userinfo/端口。"""
+    """URL parse error branches: scheme/hostname/userinfo/port."""
     resolver = FakeResolver(["93.184.216.34"])
     connector = RecordingConnector([])
     result = await _run(url, resolver=resolver, connector=connector)
@@ -413,7 +413,7 @@ async def test_http_rejects_bad_urls(url: str, reason: str) -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_connection_oserror() -> None:
-    """连接抛 OSError → 结构化错误回传（不外抛）。"""
+    """A connection raising OSError → a structured error is returned (no propagation)."""
 
     class FailingConnector:
         async def __call__(
@@ -432,7 +432,7 @@ async def test_http_connection_oserror() -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """连接挂起 → 超时错误（TIMEOUT_SECONDS monkeypatch 为 0.05s 加速）。"""
+    """A hanging connection → a timeout error (TIMEOUT_SECONDS monkeypatched to 0.05s for speed)."""
     import asyncio
 
     monkeypatch.setattr(http_request, "TIMEOUT_SECONDS", 0.05)
@@ -455,7 +455,7 @@ async def test_http_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_writer_cleanup_failure_ignored() -> None:
-    """连接清理（wait_closed）失败不影响已有响应结果。"""
+    """A failed connection cleanup (wait_closed) does not affect an already-obtained response."""
 
     class CleanupFailingWriter(FakeWriter):
         async def wait_closed(self) -> None:
@@ -483,7 +483,7 @@ async def test_http_writer_cleanup_failure_ignored() -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_blocks_empty_dns_result() -> None:
-    """DNS 解析返回空列表 → BLOCKED。"""
+    """DNS resolution returning an empty list → BLOCKED."""
 
     class EmptyResolver:
         def __init__(self) -> None:
@@ -506,7 +506,7 @@ async def test_http_blocks_empty_dns_result() -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_rejects_malformed_chunk_size() -> None:
-    """chunked size 行非十六进制 → malformed chunk size。"""
+    """A non-hexadecimal chunked size line → malformed chunk size."""
     raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n"
     resolver = FakeResolver(["93.184.216.34"])
     connector = RecordingConnector([raw])
@@ -520,8 +520,8 @@ async def test_http_rejects_malformed_chunk_size() -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_http_content_length_short_read() -> None:
-    """content-length 声明长于实际 body → 提前 EOF 中断，已读部分仍返回。"""
-    # 声明 10 字节，实际只有 4 字节即连接关闭
+    """content-length longer than the actual body → an early EOF interrupts; the bytes already read are still returned."""
+    # declares 10 bytes, only 4 bytes arrive before the connection closes
     raw = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\npart"
     resolver = FakeResolver(["93.184.216.34"])
     connector = RecordingConnector([raw])

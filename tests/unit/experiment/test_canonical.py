@@ -1,4 +1,4 @@
-"""PA-4 canonical JSON 测试（契约 §7；-k canonical 命中）。"""
+"""PA-4 canonical JSON tests (contract §7; matched by -k canonical)."""
 
 from __future__ import annotations
 
@@ -32,14 +32,14 @@ GOLDEN_SPEC: dict[str, object] = {
 
 def test_canonical_sorted_compact() -> None:
     text = canonical_json({"b": 1, "a": {"y": [1, 2], "x": "s"}})
-    assert text == '{"a":{"x":"s","y":[1,2]},"b":1}'  # 键排序、无空白
+    assert text == '{"a":{"x":"s","y":[1,2]},"b":1}'  # sorted keys, no whitespace
     assert " " not in text
     assert "\n" not in text
 
 
 def test_canonical_utf8() -> None:
     text = canonical_json({"level": "中文水平"})
-    assert text == '{"level":"中文水平"}'  # ensure_ascii=False：UTF-8 直出
+    assert text == '{"level":"中文水平"}'  # ensure_ascii=False: UTF-8 direct output
     assert canonical_json({"水平": "左"}) == '{"水平":"左"}'
 
 
@@ -53,7 +53,7 @@ def test_canonical_rejects_nan() -> None:
 
 
 def test_default_omission_same_fingerprint() -> None:
-    """省略/补全默认字段两种写法的 config_fingerprint 一致（提案 MI-2 语义）。"""
+    """Omitted vs. default-filled fields produce the same config_fingerprint (proposal MI-2 semantics)."""
     omitted: dict[str, object] = {
         "schema_version": 1,
         "name": "minimal",
@@ -74,5 +74,5 @@ def test_default_omission_same_fingerprint() -> None:
     fp_completed = validate_spec(completed).config_fingerprint
     assert fp_omitted is not None and fp_completed is not None
     assert fp_omitted == fp_completed
-    # 指纹对解析后规范化对象计算
+# the fingerprint is computed over the parsed, normalized object
     assert fp_omitted == sha256_hex(canonical_json(ExperimentSpec.model_validate(omitted).model_dump()))

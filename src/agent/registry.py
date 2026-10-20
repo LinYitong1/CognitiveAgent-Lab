@@ -1,4 +1,4 @@
-"""ToolRegistry：运行期唯一工具入口，异常不外抛（契约 §1.2；M1-3）。"""
+"""ToolRegistry: the sole runtime tool entry point; exceptions never escape (contract §1.2; M1-3)."""
 
 from __future__ import annotations
 
@@ -12,17 +12,17 @@ from src.models.tool_spec import ToolSpec
 
 
 class ToolRegistryError(Exception):
-    """注册期校验失败（启动期错误，非运行期）。"""
+    """Registration-time validation failure (a startup error, not a runtime one)."""
 
 
 class ToolRegistry:
-    """工具注册表。"""
+    """The tool registry."""
 
     def __init__(self) -> None:
         self._specs: dict[str, ToolSpec] = {}
 
     def register(self, spec: ToolSpec) -> None:
-        """校验并登记；任何校验失败抛 ToolRegistryError。"""
+        """Validate and register; any validation failure raises ToolRegistryError."""
         if not spec.name:
             raise ToolRegistryError("tool name must be non-empty")
         if spec.name in self._specs:
@@ -34,7 +34,7 @@ class ToolRegistry:
         self._specs[spec.name] = spec
 
     def get_schemas(self) -> list[dict[str, Any]]:
-        """导出 OpenAI tools 格式（供 LLMClient.chat 的 tools 参数）。"""
+        """Export in OpenAI tools format (for the tools parameter of LLMClient.chat)."""
         return [
             {
                 "type": "function",
@@ -48,7 +48,7 @@ class ToolRegistry:
         ]
 
     async def execute(self, name: str, args: dict[str, Any]) -> ToolResult:
-        """运行期唯一入口：任何失败路径都返回 ToolResult(ok=False)，不外抛异常。"""
+        """The sole runtime entry: every failure path returns ToolResult(ok=False); nothing escapes."""
         spec = self._specs.get(name)
         if spec is None:
             return ToolResult(ok=False, error=f"unknown tool: {name}")
@@ -56,7 +56,7 @@ class ToolRegistry:
             parsed = spec.input_model.model_validate(args)
         except ValidationError as exc:
             return ToolResult(ok=False, error=f"invalid arguments: {exc}"[:512])
-        except Exception as exc:  # 防御：非预期校验错误也不外抛
+        except Exception as exc:  # defensive: unexpected validation errors do not escape either
             return ToolResult(ok=False, error=f"invalid arguments: {exc}"[:512])
         try:
             return await spec.executor(parsed)
@@ -64,5 +64,5 @@ class ToolRegistry:
             return ToolResult(ok=False, error=f"tool execution failed: {type(exc).__name__}: {exc}"[:512])
 
     def get(self, name: str) -> ToolSpec | None:
-        """按名取 spec（测试与 M2 预留）。"""
+        """Fetch a spec by name (reserved for tests and M2)."""
         return self._specs.get(name)

@@ -1,4 +1,4 @@
-"""公开事件模型（契约 §1.0；ARCHITECTURE §3.1 / ADR-006，无 thought）。"""
+"""Public event models (contract §1.0; ARCHITECTURE §3.1 / ADR-006; no thought events)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 
 class AgentEventType(str, Enum):
-    """公开事件类型完整枚举。"""
+    """Complete enumeration of public event types."""
 
     status = "status"
     tool_call = "tool_call"
@@ -19,9 +19,9 @@ class AgentEventType(str, Enum):
 
 
 class AgentEvent(BaseModel):
-    """单条公开事件。"""
+    """One public event."""
 
     type: AgentEventType
-    seq: int  # 任务级单调递增，从 1 开始
+    seq: int  # task-level monotonically increasing, starting at 1
     ts: datetime  # UTC
     payload: dict[str, object] = Field(default_factory=dict)

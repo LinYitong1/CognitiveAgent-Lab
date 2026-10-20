@@ -1,6 +1,6 @@
-"""calc 工具：AST 白名单安全表达式计算（契约 §2.1；ARCHITECTURE §6.1 / ADR-005）。
+"""calc tool: AST-whitelist safe expression evaluation (contract §2.1; ARCHITECTURE §6.1 / ADR-005).
 
-全程禁用 eval/exec/compile 字符串执行——求值为自实现 AST 递归求值器。
+eval/exec/compile string execution is banned throughout — evaluation is a hand-written recursive AST evaluator.
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ from src.config import Settings
 from src.models.tool_result import ToolResult
 from src.models.tool_spec import ToolSpec
 
-MAX_DEPTH = 20  # AST 嵌套深度上限
+MAX_DEPTH = 20  # AST nesting depth limit
 
 _ALLOWED_BINOPS: tuple[type[ast.operator], ...] = (
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
 )
 _ALLOWED_UNARYOPS: tuple[type[ast.unaryop], ...] = (ast.UAdd, ast.USub)
 
-# 函数白名单：名 → (实现, (最少元数, 最多元数或 None 表示不限))
+# Function whitelist: name → (implementation, (min arity, max arity or None for unlimited))
 _FUNCTIONS: dict[str, tuple[Callable[..., Any], tuple[int, int | None]]] = {
     "abs": (abs, (1, 1)),
     "min": (min, (2, None)),
@@ -32,19 +32,19 @@ _FUNCTIONS: dict[str, tuple[Callable[..., Any], tuple[int, int | None]]] = {
     "pow": (pow, (2, 2)),
 }
 
-_MAX_POW_EXPONENT = 1000  # Pow 指数绝对值上限
+_MAX_POW_EXPONENT = 1000  # absolute-value limit for Pow exponents
 
 
 class _CalcBlocked(Exception):
-    """安全拒绝（→ BLOCKED: 前缀）。"""
+    """Security refusal (→ BLOCKED: prefix)."""
 
 
 class _CalcOutOfRange(Exception):
-    """数学越界（指数过大/复数/inf）。"""
+    """Math out of range (oversized exponent / complex / inf)."""
 
 
 def _power(left: int | float, right: int | float) -> int | float:
-    """Pow 统一检查：指数绝对值上限、复数/inf 结果拦截（BinOp 与 pow() 函数共用）。"""
+    """Unified Pow check: exponent absolute-value limit, complex/inf result interception (shared by BinOp and the pow() function)."""
     if abs(right) > _MAX_POW_EXPONENT:
         raise _CalcOutOfRange
     value = left**right
@@ -54,13 +54,13 @@ def _power(left: int | float, right: int | float) -> int | float:
 
 
 class CalcInput(BaseModel):
-    """calc 参数。"""
+    """calc arguments."""
 
     expression: str = Field(min_length=1, max_length=200)
 
 
 def _paren_depth(expression: str) -> int:
-    """括号最大嵌套深度（括号不产生 AST 节点，需单独计数）。"""
+    """Maximum parenthesis nesting depth (parentheses produce no AST node, counted separately)."""
     depth = 0
     max_depth = 0
     for ch in expression:
@@ -73,13 +73,13 @@ def _paren_depth(expression: str) -> int:
 
 
 def _eval(node: ast.AST, depth: int) -> int | float:
-    """白名单递归求值器：凡不在白名单的节点一律拒绝。"""
+    """Whitelist recursive evaluator: any node not in the whitelist is rejected."""
     if depth > MAX_DEPTH:
         raise _CalcBlocked("expression too deep")
     if isinstance(node, ast.Expression):
         return _eval(node.body, depth)
     if isinstance(node, ast.Constant):
-        # bool 是 int 子类，显式排除；字符串/None 拒绝
+        # bool is an int subclass, excluded explicitly; strings/None rejected
         if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
             raise _CalcBlocked(f"constant not allowed: {node.value!r}")
         return node.value
@@ -96,7 +96,7 @@ def _eval(node: ast.AST, depth: int) -> int | float:
         if isinstance(op, ast.Mult):
             return left * right
         if isinstance(op, ast.Div):
-            return left / right  # 除零由 ZeroDivisionError 路径处理
+            return left / right  # division by zero handled by the ZeroDivisionError path
         if isinstance(op, ast.Mod):
             return left % right
         if isinstance(op, ast.Pow):
@@ -123,8 +123,8 @@ def _eval(node: ast.AST, depth: int) -> int | float:
         if node.func.id == "pow" and len(args) == 2:
             return _power(args[0], args[1])
         return func(*args)
-    # 凡不在白名单：Name、Attribute、Subscript、Lambda、Compare、BoolOp、IfExp、
-    # Tuple/List/Set/Dict、推导式等一律拒绝
+    # Anything not in the whitelist: Name, Attribute, Subscript, Lambda, Compare, BoolOp, IfExp,
+    # Tuple/List/Set/Dict, comprehensions, etc. are all rejected
     raise _CalcBlocked(f"node not allowed: {type(node).__name__}")
 
 
@@ -153,15 +153,15 @@ async def _execute(args: CalcInput) -> ToolResult:
 
 
 async def _executor(base: Any) -> ToolResult:
-    """BaseModel 入口包装（registry 统一调用签名）。"""
+    """BaseModel entry wrapper (unified registry call signature)."""
     return await _execute(cast(CalcInput, base))
 
 
 def build_tool_spec(settings: Settings) -> ToolSpec:
-    """构造 calc 的 ToolSpec（settings 保留统一签名，calc 无配置项）。"""
+    """Build calc's ToolSpec (settings keeps the unified signature; calc has no configuration)."""
     return ToolSpec(
         name="calc",
-        description="计算算术表达式，支持 + - * / % ** 与函数 abs/min/max/round/sqrt/pow",
+        description="Evaluate an arithmetic expression; supports + - * / % ** and the functions abs/min/max/round/sqrt/pow",
         input_model=CalcInput,
         idempotency="idempotent",
         risk_level="low",

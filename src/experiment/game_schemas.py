@@ -1,20 +1,20 @@
-"""GameSpec schema 与 validate_game 校验（Phase B 契约 B0 版，冻结）。
+"""GameSpec schema and the validate_game check (Phase B contract B0 version, frozen).
 
-职责铁律（契约 §1）：实验逻辑归 ExperimentSpec/Bundle，游戏表现归 GameSpec。
-GameSpec 只有"引用"（ExperimentRef 三重指纹），没有"重算"——不存在任何
-条件分配/试次/正确性判定字段；全部模型 extra="forbid"（防线 D-1）。
+Core rule (contract §1): experiment logic belongs to ExperimentSpec/Bundle, game presentation to GameSpec.
+GameSpec only holds "references" (the triple-fingerprint ExperimentRef) and never "recomputation" — there is no
+condition-allocation / trial / correctness field at all; every model is extra="forbid" (defense D-1).
 
-校验规则 G1~G7（契约 §4）：
-- G1 schema 层：Pydantic 校验（含拒收未声明字段）→ SCHEMA_INVALID；
-- G2 跨层引用：experiment_ref 六项与 Bundle 对齐 + 重算整包指纹 → REF_MISMATCH；
-- G3/G4/G5/G6 键位绑定跨层规则 → UNKNOWN_RESPONSE / INVALID_BINDING_TARGET /
+Validation rules G1~G7 (contract §4):
+- G1 schema layer: Pydantic validation (including rejection of undeclared fields) → SCHEMA_INVALID;
+- G2 cross-layer reference: the six experiment_ref fields align with the Bundle + full-bundle fingerprint recomputation → REF_MISMATCH;
+- G3/G4/G5/G6 cross-layer key-binding rules → UNKNOWN_RESPONSE / INVALID_BINDING_TARGET /
   OPTION_OUT_OF_DOMAIN / DUPLICATE_KEY / MISSING_BINDING / INVALID_KEY；
-- G7 体积护栏：序列化 > 256KB → GAME_SPEC_TOO_LARGE。
+- G7 size guard: serialized > 256KB → GAME_SPEC_TOO_LARGE.
 
-确定性（契约 §5）：validate_game 为纯函数；game_config_fingerprint =
-SHA-256(canonical_json(game_spec))——同内容同指纹，与键序/空白无关。
+Determinism (contract §5): validate_game is a pure function; game_config_fingerprint =
+SHA-256(canonical_json(game_spec)) — same content, same fingerprint, independent of key order/whitespace.
 
-MVP 标记（契约 §9）：状态机与交互类型为 MVP 支持集，非永久架构限制。
+MVP marker (contract §9): the state machine and interaction types are the MVP support set, not a permanent architectural limit.
 """
 
 from __future__ import annotations
@@ -25,27 +25,27 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.experiment.canonical import canonical_json, sha256_hex
 
-MAX_GAME_SPEC_BYTES = 256 * 1024  # 序列化体积护栏（G7，镜像 Phase A config 护栏）
+MAX_GAME_SPEC_BYTES = 256 * 1024  # serialization size guard (G7, mirrors the Phase A config guard)
 
 _HEX64 = r"^[0-9a-f]{64}$"
 _NAMED_KEYS = frozenset({"space", "enter", "left", "right", "up", "down"})
 
 
 class _Forbid(BaseModel):
-    """防线 D-1：拒收一切未声明字段。"""
+    """Defense D-1: reject every undeclared field."""
 
     model_config = ConfigDict(extra="forbid")
 
 
 class GameMeta(_Forbid):
-    """游戏自标识（纯呈现层元信息）。"""
+    """Game self-identification (pure presentation metadata)."""
 
     name: str = Field(min_length=1, max_length=100)
     version: str = "0.1.0"
 
 
 class ExperimentRef(_Forbid):
-    """对 ExperimentBundle 的引用（三重指纹对齐；字段均为只读指针复制，非实验逻辑）。"""
+    """Reference to the ExperimentBundle (triple-fingerprint alignment; fields are read-only pointer copies, not experiment logic)."""
 
     name: str
     version: str
@@ -56,7 +56,7 @@ class ExperimentRef(_Forbid):
 
 
 class SceneSpec(_Forbid):
-    """场景呈现（纯表现；assets 仅限界面装饰，禁止参与试次内容——渲染器契约落实）。"""
+    """Scene presentation (pure presentation; assets are UI decoration only, forbidden from trial content — renderer contract enforcement)."""
 
     title: str = Field(default="", max_length=200)
     instructions: str = Field(default="", max_length=2000)
@@ -66,28 +66,28 @@ class SceneSpec(_Forbid):
 
 
 class InputBinding(_Forbid):
-    """键位绑定：物理键 → choice 选项值（绑定到 ExperimentSpec 已声明的响应变量）。"""
+    """Key binding: physical key → choice option value (bound to a response variable declared in ExperimentSpec)."""
 
     response_name: str
     keys: dict[str, str]
 
 
 class InputSpec(_Forbid):
-    """输入模态与绑定（B0 仅 keyboard；pointer/touch 为保留扩展位，走契约修订）。"""
+    """Input modality and bindings (B0: keyboard only; pointer/touch are reserved extension points via contract revision)."""
 
     modalities: list[Literal["keyboard"]] = Field(default_factory=lambda: ["keyboard"])
     bindings: list[InputBinding] = Field(default_factory=list)
 
 
 class FeedbackSpec(_Forbid):
-    """反馈样式（正确性只读 Bundle 判定，本层只选呈现形式）。"""
+    """Feedback style (correctness is read-only from the Bundle; this layer only picks the presentation form)."""
 
     on_response: Literal["none", "correctness-flash", "outcome-text"] = "none"
     duration_ms: int = Field(default=200, ge=0, le=5000)
 
 
 class FlowSpec(_Forbid):
-    """交互流程开关（MVP 流程：ready/块间歇/结束页，契约 §9.1）。"""
+    """Flow switches (MVP flow: ready/block breaks/end screen, contract §9.1)."""
 
     ready_screen: bool = True
     block_breaks: bool = True
@@ -95,7 +95,7 @@ class FlowSpec(_Forbid):
 
 
 class GamificationSpec(_Forbid):
-    """游戏化包装（全部可选；得分由渲染器按 Bundle 正确性累计）。"""
+    """Gamification wrapper (all optional; the score is accumulated by the renderer from Bundle correctness)."""
 
     score: bool = False
     progress_bar: bool = True
@@ -103,7 +103,7 @@ class GamificationSpec(_Forbid):
 
 
 class GameSpec(_Forbid):
-    """游戏呈现规格（表现层根模型）。"""
+    """Game presentation spec (the root model of the presentation layer)."""
 
     schema_version: Literal[1] = 1
     game: GameMeta
@@ -116,7 +116,7 @@ class GameSpec(_Forbid):
 
 
 class GameValidationIssue(BaseModel):
-    """验证问题（errors 与 warnings 共用，结构对齐 Phase A ValidationIssue）。"""
+    """Validation issue (shared by errors and warnings; structure aligned with Phase A ValidationIssue)."""
 
     error_code: str
     path: str
@@ -125,17 +125,17 @@ class GameValidationIssue(BaseModel):
 
 
 class GameValidationResult(BaseModel):
-    """validate_game 的返回（契约 §4 输出结构）。"""
+    """Return value of validate_game (contract §4 output structure)."""
 
-    game_spec: GameSpec | None  # G1 失败时为 None
+    game_spec: GameSpec | None  # None when G1 fails
     valid: bool
     errors: list[GameValidationIssue]
     warnings: list[GameValidationIssue]
-    game_config_fingerprint: str | None  # G1 失败时为 None
+    game_config_fingerprint: str | None  # None when G1 fails
 
 
 def game_config_fingerprint(game_spec: GameSpec) -> str:
-    """GameSpec 指纹：SHA-256(canonical_json(model_dump()))——键序/空白无关（§5）。"""
+    """GameSpec fingerprint: SHA-256(canonical_json(model_dump())) — key-order/whitespace independent (§5)."""
     return sha256_hex(canonical_json(game_spec.model_dump()))
 
 
@@ -146,7 +146,7 @@ def _issue(error_code: str, path: str, message: str, suggestion: str) -> GameVal
 
 
 def _pydantic_issues(exc: ValidationError) -> list[GameValidationIssue]:
-    """Pydantic ValidationError → 结构化 SCHEMA_INVALID 问题列表。"""
+    """Pydantic ValidationError → a structured list of SCHEMA_INVALID issues."""
     issues: list[GameValidationIssue] = []
     for err in exc.errors():
         loc = ".".join(str(part) for part in err["loc"]) or "<root>"
@@ -163,7 +163,7 @@ def _pydantic_issues(exc: ValidationError) -> list[GameValidationIssue]:
 
 
 def _check_size_guard(raw: object, errors: list[GameValidationIssue]) -> bool:
-    """G7 体积护栏：序列化字节 > 256KB → GAME_SPEC_TOO_LARGE。返回是否继续。"""
+    """G7 size guard: serialized bytes > 256KB → GAME_SPEC_TOO_LARGE. Returns whether to continue."""
     try:
         size = len(canonical_json(raw).encode("utf-8"))
     except (TypeError, ValueError):
@@ -190,7 +190,7 @@ def _check_size_guard(raw: object, errors: list[GameValidationIssue]) -> bool:
 
 
 def _bundle_expected(bundle: dict[str, object]) -> dict[str, tuple[str, object]] | None:
-    """从 Bundle 提取 G2 六项期望值；结构不完整时返回 None。"""
+    """Extract the six G2 expected values from the Bundle; return None when the structure is incomplete."""
     spec_part = bundle.get("spec")
     repro = bundle.get("reproducibility")
     if not isinstance(spec_part, dict) or not isinstance(repro, dict):
@@ -214,8 +214,8 @@ def _bundle_expected(bundle: dict[str, object]) -> dict[str, tuple[str, object]]
 def _check_reference(
     ref: ExperimentRef, bundle: dict[str, object], errors: list[GameValidationIssue]
 ) -> None:
-    """G2：Bundle 完整性重算 + 六项引用逐一比对（首个失配即报，契约 §4）。"""
-    # 整包完整性重算（契约 §9.2：可复现验证，检出 Bundle 被篡改）
+    """G2: full-bundle integrity recomputation + the six references compared one by one (the first mismatch is reported, contract §4)."""
+    # Full-bundle integrity recomputation (contract §9.2: reproducible verification, detects a tampered Bundle)
     try:
         stripped = {
             key: value
@@ -254,7 +254,7 @@ def _check_reference(
             )
         )
         return
-    # 六项逐一比对（报首个失配）
+    # Compare the six one by one (report the first mismatch)
     for path, (attr, actual) in expected.items():
         given = getattr(ref, attr)
         if given != actual:
@@ -272,7 +272,7 @@ def _check_reference(
 def _check_bindings(
     game_spec: GameSpec, bundle: dict[str, object], errors: list[GameValidationIssue]
 ) -> list[GameValidationIssue]:
-    """G3~G6 键位绑定跨层规则；同时返回 warnings（PARTIAL_OPTION_COVERAGE，§9.4）。"""
+    """G3~G6 cross-layer key-binding rules; also returns warnings (PARTIAL_OPTION_COVERAGE, §9.4)."""
     warnings: list[GameValidationIssue] = []
     spec_part = bundle.get("spec")
     if not isinstance(spec_part, dict):
@@ -287,7 +287,7 @@ def _check_bindings(
             responses[raw["name"]] = raw
 
     keyboard = "keyboard" in game_spec.input.modalities
-    seen_keys: dict[str, int] = {}  # 物理键 → 首次出现的 binding 下标
+    seen_keys: dict[str, int] = {}  # physical key → index of the first binding that uses it
     bound_options: dict[str, set[str]] = {}
 
     for i, binding in enumerate(game_spec.input.bindings):
@@ -317,7 +317,7 @@ def _check_bindings(
         options = response.get("options")
         option_set = set(options) if isinstance(options, list) else set()
         for key, value in binding.keys.items():
-            # G6 键格式
+            # G6 key format
             if not (key in _NAMED_KEYS or (len(key) == 1 and "a" <= key <= "z")):
                 errors.append(
                     _issue(
@@ -329,7 +329,7 @@ def _check_bindings(
                     )
                 )
                 continue
-            # G5 重复键
+            # G5 duplicate key
             if key in seen_keys:
                 errors.append(
                     _issue(
@@ -341,7 +341,7 @@ def _check_bindings(
                 )
                 continue
             seen_keys[key] = i
-            # G5 选项越域
+            # G5 option out of domain
             if value not in option_set:
                 errors.append(
                     _issue(
@@ -355,7 +355,7 @@ def _check_bindings(
                 continue
             bound_options.setdefault(binding.response_name, set()).add(value)
 
-    # G5 缺失绑定：keyboard 模态下每个 choice 响应至少一个绑定
+    # G5 missing binding: under the keyboard modality every choice response needs at least one binding
     if keyboard:
         for name, response in responses.items():
             if response.get("kind") != "choice":
@@ -370,7 +370,7 @@ def _check_bindings(
                     )
                 )
 
-    # 警告：部分选项覆盖（合法但可能有选项不可达，§9.4）
+    # Warning: partial option coverage (legal but some options may be unreachable, §9.4)
     for name, response in responses.items():
         if response.get("kind") != "choice":
             continue
@@ -392,10 +392,10 @@ def _check_bindings(
 
 
 def validate_game(game_spec: object, bundle: object) -> GameValidationResult:
-    """校验 GameSpec（G1~G7，纯函数）。bundle 为已加载的 ExperimentBundle dict。"""
+    """Validate a GameSpec (G1~G7, pure function). bundle is a loaded ExperimentBundle dict."""
     errors: list[GameValidationIssue] = []
 
-    # G1 前置：必须是 dict
+    # G1 precondition: must be a dict
     if not isinstance(game_spec, dict):
         return GameValidationResult(
             game_spec=None,
@@ -412,13 +412,13 @@ def validate_game(game_spec: object, bundle: object) -> GameValidationResult:
             game_config_fingerprint=None,
         )
 
-    # G7 体积护栏（在原始输入上度量）
+    # G7 size guard (measured on the raw input)
     if not _check_size_guard(game_spec, errors):
         return GameValidationResult(
             game_spec=None, valid=False, errors=errors, warnings=[], game_config_fingerprint=None
         )
 
-    # G1 schema 层
+    # G1 schema layer
     try:
         parsed = GameSpec.model_validate(game_spec)
     except ValidationError as exc:
@@ -432,7 +432,7 @@ def validate_game(game_spec: object, bundle: object) -> GameValidationResult:
 
     fingerprint = game_config_fingerprint(parsed)
 
-    # G2~G6 需 Bundle；bundle 非 dict → REF_MISMATCH（引用无法对齐）
+    # G2~G6 need the Bundle; a non-dict bundle → REF_MISMATCH (references cannot be aligned)
     if not isinstance(bundle, dict):
         errors.append(
             _issue(

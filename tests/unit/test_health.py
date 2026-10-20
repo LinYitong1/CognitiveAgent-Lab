@@ -1,4 +1,4 @@
-"""M0-2：/health 端点真实测试（collected ≥ 1 的最低要求）。"""
+"""M0-2: a real test of the /health endpoint (the minimum requirement of collected ≥ 1)."""
 
 from __future__ import annotations
 

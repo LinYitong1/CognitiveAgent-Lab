@@ -1,6 +1,6 @@
-"""PA-11 export 沙箱安全测试（契约 §7；-k "export_blocks or export_sandbox" 命中）。
+"""PA-11 export sandbox security tests (contract §7; matched by -k "export_blocks or export_sandbox").
 
-沙箱根指固定测试目录（与 M1 file_write 测试同构，五步规则全部生效证据）。
+The sandbox root points to a fixed test directory (isomorphic with the M1 file_write tests; evidence that the five-step rule is fully in effect).
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ import pytest
 from src.config import Settings
 from src.tools import experiment_tools
 
-# 环境说明：沙箱对 pytest tmp_path 的会话根目录 mkdir 存在间歇性拦截 → 沿用 M1
-# 固定测试子目录模式（自建自清，清不掉也无妨——data/ 已被 gitignore）。
+# Environment note: the host sandbox intermittently blocks session-root mkdir on pytest tmp_path → the M1
+# fixed-test-subdirectory pattern is kept (self-created, self-cleaned; leftovers are fine — data/ is gitignored).
 TEST_SANDBOX = Path("data/.test-sandbox/experiment-export")
 
 
@@ -77,9 +77,9 @@ async def test_export_success_in_sandbox(sandbox: Path) -> None:
     assert "wrote experiments/generic-2x2-v0.1.0-seed7.json" in result.result
     assert "trials_fingerprint=" in result.result
     assert "bundle_sha256=" in result.result
-    assert len(result.result) < 512  # §5.3：短文本不被 _SUMMARY_LIMIT 截断
+    assert len(result.result) < 512  # §5.3: short text is not truncated by _SUMMARY_LIMIT
     text = written.read_text(encoding="utf-8")
-    assert "\n" not in text  # canonical JSON 单行
+    assert "\n" not in text  # canonical JSON is a single line
 
 
 @pytest.mark.asyncio
@@ -99,7 +99,7 @@ async def test_export_blocks_symlink(sandbox: Path) -> None:
     _ensure_dir(real_dir)
     (real_dir / "inside.json").write_text("{}", encoding="utf-8")
 
-    # 目录符号链接（即使指向沙箱内也拒绝）
+    # directory symlink (rejected even when it points inside the sandbox)
     dir_link = sandbox / f"link-{os.getpid()}"
     if not dir_link.is_symlink():
         os.symlink(real_dir.resolve(), dir_link)
@@ -107,7 +107,7 @@ async def test_export_blocks_symlink(sandbox: Path) -> None:
     assert not result.ok
     assert "symlink" in result.error
 
-    # 目标文件本身是符号链接
+    # the target file itself is a symlink
     file_link = sandbox / f"file-link-{os.getpid()}"
     if not file_link.is_symlink():
         os.symlink((real_dir / "inside.json").resolve(), file_link)
@@ -120,10 +120,10 @@ async def test_export_blocks_symlink(sandbox: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_export_blocks_prefix_confusion(sandbox: Path) -> None:
-    """与沙箱根同前缀字符串但非子目录（data-evil 形态）——is_relative_to 组件边界证据。"""
+    """Same string prefix as the sandbox root but not a subdirectory (the data-evil shape) — evidence of the is_relative_to component boundary."""
     evil_dir = TEST_SANDBOX.parent / "experiment-export-evil"
     _ensure_dir(evil_dir)
-    # 沙箱内的符号链接指向 data-evil（无 .. 的逃逸路径）
+# a symlink inside the sandbox pointing to data-evil (an escape path without ..)
     escape = sandbox / f"escape-{os.getpid()}"
     if not escape.is_symlink():
         os.symlink(evil_dir.resolve(), escape)
@@ -137,11 +137,11 @@ async def test_export_blocks_prefix_confusion(sandbox: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_export_blocks_oversize(sandbox: Path) -> None:
-    """构造 >1MB Bundle → BLOCKED: export too large（OUT-7 / R-6）。"""
+    """Build a >1MB bundle → BLOCKED: export too large (OUT-7 / R-6)."""
     sandbox = TEST_SANDBOX
     big_spec: dict[str, object] = {
         **SPEC_DICT,
-        "blocks": [{"name": "main", "trial_count": 20_000}],  # 2 万试次 ≈ 3MB canonical
+        "blocks": [{"name": "main", "trial_count": 20_000}],  # 20k trials ≈ 3MB canonical
     }
     result = await _export(sandbox, "experiments/big.json", config=big_spec)
     assert not result.ok

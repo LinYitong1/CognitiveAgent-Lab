@@ -1,14 +1,14 @@
-"""静态分层依赖检查（G-4 门禁，规则来自 ARCHITECTURE §3）。
+"""Static layering dependency check (G-4 gate; rules from ARCHITECTURE §3).
 
-依赖方向（强制单向）：``api → services → agent → tools/storage``。
-- 业务层只允许 import 同层或更低层（tools 与 storage 同层，可互引）；
-  import 更高层即反向依赖，违规。
-- ``src/models/`` 与 ``src/config.py`` 为共享层：可被任何业务层引用，
-  但自身不得 import 任何业务层（仅被引用，不引用业务层）。
-- 项目外 import（标准库/第三方）不受限。
+Dependency direction (strictly one-way): ``api → services → agent → tools/storage``.
+- Business layers may only import the same layer or lower (tools and storage share a
+  layer and may reference each other); importing a higher layer is a reverse dependency.
+- ``src/models/`` and ``src/config.py`` are shared layers: any business layer may reference
+  them, but they must not import any business layer (referenced only, never referencing).
+- Imports outside the project (stdlib/third-party) are unrestricted.
 
-用法：从项目根执行 ``python -m scripts.check_layers``；
-退出码 0 = 通过（无反向 import），1 = 存在违规。
+Usage: run ``python -m scripts.check_layers`` from the project root;
+exit code 0 = pass (no reverse imports), 1 = violations found.
 """
 
 from __future__ import annotations
@@ -21,26 +21,26 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = PROJECT_ROOT / "src"
 
-# 业务分层：数值越大层级越低（被依赖方）；只允许高层 → 低层
+# Business layers: higher number = lower layer (the depended-on side); only higher → lower is allowed
 LAYER_ORDER: dict[str, int] = {
     "api": 0,
     "services": 1,
     "agent": 2,
     "tools": 3,
     "storage": 3,
-    "experiment": 4,  # Phase A 新增：tools 之下的实验引擎层（契约 §8.3 批准扩展）
+    "experiment": 4,  # added in Phase A: the experiment engine layer below tools (approved extension, contract §8.3)
 }
 
-# 共享层：仅被引用，不得引用任何业务层
+# Shared layers: referenced only; must not reference any business layer
 SHARED_MODULES: frozenset[str] = frozenset({"models", "config"})
 
 
 @dataclass(frozen=True)
 class ImportEdge:
-    """一条项目内 import 依赖：source 模块 → target 顶层包。"""
+    """One intra-project import dependency: source module → target top-level package."""
 
     source: Path
-    source_layer: str  # 业务层名 / 共享模块名 / "src"（src/__init__.py）
+    source_layer: str  # business layer name / shared module name / "src" (src/__init__.py)
     target: str
     lineno: int
     stmt: str
@@ -48,14 +48,14 @@ class ImportEdge:
 
 @dataclass(frozen=True)
 class Violation:
-    """一条分层违规。"""
+    """One layering violation."""
 
     edge: ImportEdge
     reason: str
 
 
 def module_layer(path: Path) -> str:
-    """返回模块所属层：src 下第一级包名（或顶层模块名去掉 .py）。"""
+    """Return the layer a module belongs to: the first-level package under src (or the top-level module name minus .py)."""
     rel = path.relative_to(SRC_ROOT)
     first = rel.parts[0]
     if len(rel.parts) == 1:
@@ -64,13 +64,13 @@ def module_layer(path: Path) -> str:
 
 
 def iter_project_imports(path: Path) -> list[tuple[str, int]]:
-    """提取文件中所有指向项目内 src 包的 import（绝对 + 相对）。
+    """Extract all imports in a file that target project src packages (absolute + relative).
 
-    返回 (目标模块路径, 行号) 列表；目标以 "src." 前缀规范化。
+    Returns a list of (target module path, line number); targets are normalized with the "src." prefix.
     """
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
-    # 当前模块在 src 包坐标下的包路径，用于解析相对导入
+    # Package path of the current module in src coordinates, used to resolve relative imports
     rel = path.relative_to(SRC_ROOT)
     package_parts: tuple[str, ...] = ("src",)
     if len(rel.parts) > 1:
@@ -86,53 +86,53 @@ def iter_project_imports(path: Path) -> list[tuple[str, int]]:
                 if node.module:
                     targets.append((node.module, node.lineno))
             else:
-                # 相对导入：按 level 回退包路径
+    # Relative import: walk the package path back by the given level
                 base_parts = package_parts[: len(package_parts) - (node.level - 1)] if node.level > 1 else package_parts
                 prefix = ".".join(base_parts)
                 mod = node.module or ""
                 targets.append((f"{prefix}.{mod}" if mod else prefix, node.lineno))
-    # 仅保留项目内 import（src.* 下）
+    # Keep only intra-project imports (under src.*)
     return [(t, ln) for t, ln in targets if t == "src" or t.startswith("src.")]
 
 
 def check() -> list[Violation]:
-    """扫描 src/ 全部 .py 文件，返回违规列表。"""
+    """Scan all .py files under src/ and return the violation list."""
     violations: list[Violation] = []
     for path in sorted(SRC_ROOT.rglob("*.py")):
         layer = module_layer(path)
         for target, lineno in iter_project_imports(path):
-            # 目标顶层包（src.<pkg>.… → <pkg>；src 本身或 src/__init__ 视为无业务目标）
+            # Target top-level package (src.<pkg>.… → <pkg>; src itself or src/__init__ counts as no business target)
             parts = target.split(".")
             if len(parts) < 2:
-                continue  # `import src` 本身：不指向任何业务/共享模块
+                continue  # bare `import src`: targets no business/shared module
             target_pkg = parts[1]
             if target_pkg in LAYER_ORDER:
                 if layer in LAYER_ORDER and LAYER_ORDER[layer] > LAYER_ORDER[target_pkg]:
                     violations.append(
                         Violation(
                             edge=ImportEdge(path, layer, target_pkg, lineno, target),
-                            reason=f"反向 import：{layer}（层 {LAYER_ORDER[layer]}）"
-                            f"不得依赖 {target_pkg}（层 {LAYER_ORDER[target_pkg]}）",
+                            reason=f"reverse import: {layer} (layer {LAYER_ORDER[layer]}) "
+                            f"must not depend on {target_pkg} (layer {LAYER_ORDER[target_pkg]})",
                         )
                     )
                 elif layer in SHARED_MODULES:
                     violations.append(
                         Violation(
                             edge=ImportEdge(path, layer, target_pkg, lineno, target),
-                            reason=f"共享层 {layer} 仅被引用，不得 import 业务层 {target_pkg}",
+                            reason=f"shared layer {layer} is referenced only; must not import business layer {target_pkg}",
                         )
                     )
-            # 目标为共享层（models/config）或同层或更低层：合法
+            # Target is a shared layer (models/config), the same layer, or lower: legal
     return violations
 
 
 def main() -> int:
     if not SRC_ROOT.is_dir():
-        print(f"[FAIL] 未找到 src/ 目录：{SRC_ROOT}", file=sys.stderr)
+        print(f"[FAIL] src/ directory not found: {SRC_ROOT}", file=sys.stderr)
         return 1
     violations = check()
     if violations:
-        print(f"[FAIL] 分层依赖检查发现 {len(violations)} 处违规：", file=sys.stderr)
+        print(f"[FAIL] layering check found {len(violations)} violation(s):", file=sys.stderr)
         for v in violations:
             rel = v.edge.source.relative_to(PROJECT_ROOT)
             print(
@@ -140,7 +140,7 @@ def main() -> int:
                 file=sys.stderr,
             )
         return 1
-    print("[PASS] 分层依赖检查通过：无反向 import（api → services → agent → tools/storage，models/config 仅被引用）")
+    print("[PASS] layering check passed: no reverse imports (api → services → agent → tools/storage; models/config referenced only)")
     return 0
 
 

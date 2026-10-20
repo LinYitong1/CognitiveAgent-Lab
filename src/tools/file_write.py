@@ -1,4 +1,4 @@
-"""file_write 工具：data/ 沙箱写入（契约 §2.3；ARCHITECTURE §6.3 / ADR-005）。"""
+"""file_write tool: writes inside the data/ sandbox (contract §2.3; ARCHITECTURE §6.3 / ADR-005)."""
 
 from __future__ import annotations
 
@@ -13,22 +13,22 @@ from src.config import Settings
 from src.models.tool_result import ToolResult
 from src.models.tool_spec import ToolSpec
 
-MAX_BYTES = 1_048_576  # 1MB 字节上限
+MAX_BYTES = 1_048_576  # 1MB byte cap
 
 
 class FileWriteInput(BaseModel):
-    """file_write 参数。"""
+    """file_write arguments."""
 
-    path: str = Field(min_length=1)  # 相对沙箱根的路径
-    content: str = Field(max_length=MAX_BYTES)  # 字符上限（Pydantic 层第一道）
+    path: str = Field(min_length=1)  # path relative to the sandbox root
+    content: str = Field(max_length=MAX_BYTES)  # character cap (first guard at the Pydantic layer)
 
 
 class _FileWriteBlocked(Exception):
-    """安全拒绝（→ BLOCKED: 前缀）。"""
+    """Security refusal (→ BLOCKED: prefix)."""
 
 
 def _ensure_dir(path: Path) -> None:
-    """mkdir 容错：目录已存在（含宿主安全代理把跨进程 EEXIST 包成 PermissionError 的场景）时静默通过。"""
+    """mkdir tolerance: silently pass when the directory already exists (including the case where the host security agent wraps a cross-process EEXIST into PermissionError)."""
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -37,19 +37,19 @@ def _ensure_dir(path: Path) -> None:
 
 
 def _validate_and_write(args: FileWriteInput, sandbox: Path) -> int:
-    """五步安全规则（契约顺序冻结），返回写入字节数。"""
+    """Five-step security rule (contract order frozen); returns the number of bytes written."""
     rel_parts = Path(args.path).parts
 
-    # 1. 字符串级拒绝 .. 与绝对路径
+    # 1. string-level rejection of .. and absolute paths
     if os.path.isabs(args.path) or ".." in rel_parts:
         raise _FileWriteBlocked("path traversal")
 
-    # 沙箱根本身允许自动创建（配置指定位置），保证后续锚点存在
+    # the sandbox root itself may be auto-created (configured location), ensuring the anchor exists
     _ensure_dir(sandbox)
     sandbox_real = Path(os.path.realpath(sandbox))
     target = sandbox.joinpath(*rel_parts)
 
-    # 2. realpath + 组件边界前缀校验（防 data-evil 字符串前缀歧义）
+    # 2. realpath + component-boundary prefix validation (blocks data-evil string-prefix ambiguity)
     deepest = target
     while not deepest.exists():
         deepest = deepest.parent
@@ -57,23 +57,23 @@ def _validate_and_write(args: FileWriteInput, sandbox: Path) -> int:
     if not deepest_real.is_relative_to(sandbox_real):
         raise _FileWriteBlocked("outside sandbox")
 
-    # 3. 符号链接拒绝：沙箱根到目标每一级 lstat 检查（TOCTOU 缓解）
+    # 3. symlink rejection: lstat check at every level from the sandbox root to the target (TOCTOU mitigation)
     current = sandbox
     for part in rel_parts:
         current = current / part
         try:
             st = os.lstat(current)
         except FileNotFoundError:
-            break  # 该级及更深层均不存在，不可能含符号链接
+            break  # this level and deeper do not exist, so no symlinks are possible
         if stat.S_ISLNK(st.st_mode):
             raise _FileWriteBlocked("symlink in path")
 
     data = args.content.encode("utf-8")
-    # 4. 字节数复核（Pydantic 管字符数，此处管字节数）
+    # 4. byte-count recheck (Pydantic guards characters, this guards bytes)
     if len(data) > MAX_BYTES:
         raise _FileWriteBlocked("content too large")
 
-    # 5. 写入：自动创建沙箱内父目录，覆盖写
+    # 5. write: auto-create parent directories inside the sandbox, overwrite
     _ensure_dir(target.parent)
     target.write_bytes(data)
     return len(data)
@@ -88,7 +88,7 @@ async def _execute(args: FileWriteInput, sandbox: Path) -> ToolResult:
 
 
 def build_tool_spec(settings: Settings) -> ToolSpec:
-    """构造 file_write 的 ToolSpec（沙箱根绑定自 settings.data_sandbox_dir）。"""
+    """Build file_write's ToolSpec (the sandbox root binds to settings.data_sandbox_dir)."""
     sandbox = Path(settings.data_sandbox_dir)
 
     async def executor(base: Any) -> ToolResult:
@@ -96,7 +96,7 @@ def build_tool_spec(settings: Settings) -> ToolSpec:
 
     return ToolSpec(
         name="file_write",
-        description="把文本内容写入 data/ 沙箱目录内的文件（覆盖已存在文件）",
+        description="Write text content to a file inside the data/ sandbox directory (overwrites existing files)",
         input_model=FileWriteInput,
         idempotency="non-idempotent",
         risk_level="medium",

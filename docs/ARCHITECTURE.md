@@ -1,275 +1,284 @@
-# CognitiveAgent Lab — 技术架构
+# CognitiveAgent Lab — Technical Architecture
 
-> 版本：v1.2 ｜ 状态：**已按评审意见修订**（v1.1 经架构复审 + QA 验收标准检查两轮独立复审，v1.2 修复其指出的 P0/Major 问题）
-> 决策记录（ADR）追加在文末附录；v1.0→v1.1、v1.1→v1.2 变更记录见文末。
+> Version: v1.2 ｜ Status: **revised per review feedback** (v1.1 went through two independent reviews — the architecture review and the QA acceptance-criteria check; v1.2 fixes the P0/Major issues they raised)
+> Decision records (ADRs) are appended at the end; the v1.0→v1.1 and v1.1→v1.2 changelogs are at the end too.
 
-## 1. 系统目标
+## 1. System goal
 
-构建能理解用户目标、自主拆解任务、选择工具、执行多步骤工作流、保存任务状态、并产出执行结果与可观测日志的 AI Agent 系统。**纯工程导向**：不接入 R 代码、认知模型或既有实验数据。
+Build an AI agent system that understands user goals, autonomously decomposes tasks, selects tools, executes multi-step workflows, persists task state, and produces execution results with observable logs. **Purely engineering-oriented**: no R code, cognitive models, or pre-existing experiment data are integrated.
 
-## 2. 技术栈（锁定）
+## 2. Technology stack (locked)
 
-| 层 | 选型 | 理由 |
+| Layer | Choice | Rationale |
 |----|------|------|
-| 语言 | Python 3.13 | 环境已具备（managed runtime） |
-| Web 框架 | FastAPI | 原生 async、Pydantic 集成、自动 OpenAPI 文档 |
-| 数据校验 | Pydantic v2 + pydantic-settings | 模型即契约；配置从环境变量加载 |
-| 测试 | pytest + pytest-asyncio + httpx(TestClient) | 分层测试体系 |
-| LLM 接入 | 官方 `openai` SDK（支持自定义 `base_url`，可切换兼容端点；预留 `anthropic` SDK 适配位） | **真实 tool-calling**，不做规则模拟 |
-| Agent 编排 | **自研单主循环**（约 300 行核心代码） | 满足"真实 runtime"且不引入多 Agent 框架（约束 3） |
-| 状态存储 | SQLite（`sqlite3` + 文件库） | 零部署、可持久化、够用；预留 Postgres 迁移位 |
-| 前端 | 原生 HTML/JS 单页（`web/`）+ SSE | 任务可视化够用即可，不引 React 构建链 |
-| 可观测 | 结构化事件日志（DB 表 + JSONL 文件） | 每步可回放、可重放续传 |
+| Language | Python 3.13 | already available in the environment (managed runtime) |
+| Web framework | FastAPI | native async, Pydantic integration, automatic OpenAPI docs |
+| Data validation | Pydantic v2 + pydantic-settings | models as contracts; configuration loaded from environment variables |
+| Testing | pytest + pytest-asyncio + httpx (TestClient) | layered test system |
+| LLM access | the official `openai` SDK (supports a custom `base_url` for compatible endpoints; an `anthropic` SDK adapter slot is reserved) | **real tool-calling**, no rule-based simulation |
+| Agent orchestration | **a self-built single main loop** (~300 lines of core code) | meets the "real runtime" bar without introducing a multi-agent framework (constraint 3) |
+| State storage | SQLite (`sqlite3` + file-based DB) | zero deployment, persistent, sufficient; a Postgres migration slot is reserved |
+| Frontend | native HTML/JS single page (`web/`) + SSE | good enough for task visualization; no React build chain |
+| Observability | structured event logs (DB tables + JSONL files) | every step replayable, resumable |
 
-### 2.1 运行时依赖与必要性（完整清单，除此之外不加依赖）
+### 2.1 Runtime dependencies and necessity (complete list; nothing beyond this)
 
-| 依赖 | 必要性（一句话） |
+| Dependency | Necessity (one sentence) |
 |------|------------------|
-| fastapi | Web 框架：任务 API 与 SSE 端点的路由、校验、OpenAPI 文档 |
-| uvicorn | ASGI 服务器：运行 FastAPI 应用（含 SSE 长连接） |
-| pydantic | 数据模型即契约：请求/响应/工具参数/事件负载的校验与序列化 |
-| pydantic-settings | 配置管理：从环境变量/.env 加载密钥与运行参数 |
-| pytest | 测试框架：unit/integration/e2e 分层测试体系 |
-| pytest-asyncio | 异步测试支持：运行 async 端点与 Agent 主循环测试 |
-| httpx | HTTP 客户端：TestClient 对拍 + `http_request` 工具实现 |
-| openai | LLM 接入：真实 tool-calling，支持自定义 `base_url` 切换兼容端点 |
-| pyright | 静态类型检查：G-5a 门禁，退出码 0 才可合入 |
-| pytest-cov | 覆盖率采集：G-2 门禁的 pytest 集成插件（`--cov` 参数提供方） |
+| fastapi | web framework: routing, validation and OpenAPI docs for the task API and SSE endpoints |
+| uvicorn | ASGI server: runs the FastAPI application (incl. long-lived SSE connections) |
+| pydantic | data models as contracts: validation and serialization of requests/responses/tool arguments/event payloads |
+| pydantic-settings | configuration management: loads keys and runtime parameters from environment variables/.env |
+| pytest | test framework: the unit/integration/e2e layered test system |
+| pytest-asyncio | async test support: runs async endpoint and agent main-loop tests |
+| httpx | HTTP client: TestClient cross-checks + the `http_request` tool implementation |
+| openai | LLM access: real tool-calling, supports switching to compatible endpoints via a custom `base_url` |
+| pyright | static type checking: gate G-5a; mergeable only at exit code 0 |
+| pytest-cov | coverage collection: the pytest plugin behind gate G-2 (provides the `--cov` flag) |
 
-**依赖红线**：上表为全部允许依赖（pyright 与 pytest-cov 仅用于开发期检查与测试度量，置于 dev 分组）；引入任何新依赖必须先经 Architect 更新本表并递增版本号。
+**Dependency red line**: the table above is the entire allow-list (pyright and pytest-cov serve only development checks and test metrics and live in the dev group); introducing any new dependency requires the Architect to update this table and bump the version first.
 
-## 3. 分层架构
+## 3. Layered architecture
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│  web/            任务创建表单 · 执行轨迹时间线（公开事件流）        │  Frontend Agent
+│  web/            task-creation form · execution-trace timeline │  Frontend Agent
+│                  (public event stream)                         │
 ├───────────────────────────────────────────────────────────────┤
-│  src/api/        FastAPI 路由层                                  │  只做校验与调度
-│    POST /tasks                    创建任务(goal)                 │
-│    GET  /tasks/{id}               任务状态+步骤+结果              │
-│    GET  /tasks/{id}/events        SSE 公开事件流（支持断线重连）    │
-│    POST /tasks/{id}/resume        恢复中断任务（受恢复锁约束）      │
-│    POST /tasks/{id}/cancel        取消任务                       │
-│    POST /tasks/{id}/tool-calls/{tool_call_id}/confirm           │
-│                                   uncertain 非幂等调用人工确认    │
+│  src/api/        FastAPI routing layer                          │  validation and dispatch only
+│    POST /tasks                    create a task (goal)         │
+│    GET  /tasks/{id}               task status + steps + result │
+│    GET  /tasks/{id}/events        SSE public event stream      │
+│                                   (reconnect supported)        │
+│    POST /tasks/{id}/resume        resume an interrupted task   │
+│                                   (recovery-lock governed)     │
+│    POST /tasks/{id}/cancel        cancel a task                │
+│    POST /tasks/{id}/tool-calls/{tool_call_id}/confirm          │
+│                                   manual confirmation of an    │
+│                                   uncertain non-idempotent call│
 ├───────────────────────────────────────────────────────────────┤
-│  src/services/   编排层（事务边界、checkpoint、恢复锁）            │
+│  src/services/   orchestration layer (transaction boundaries,  │
+│                   checkpoints, recovery lock)                  │
 ├───────────────────────────────────────────────────────────────┤
-│  src/agent/      Agent 核心（真实 LLM 驱动）                      │  Backend Agent
-│    loop.py       主循环：plan → act → observe                   │
-│    llm.py        LLMClient(统一封装, env 配置)                   │
-│    registry.py   工具注册表(schema 自动生成 + 幂等/风险声明)       │
+│  src/agent/      agent core (driven by a real LLM)             │  Backend Agent
+│    loop.py       main loop: plan → act → observe               │
+│    llm.py        LLMClient (unified wrapper, env config)       │
+│    registry.py   tool registry (auto schema generation +       │
+│                   idempotency/risk declarations)               │
 ├───────────────────────────────────────────────────────────────┤
-│  src/tools/      工具实现（Pydantic 输入+executor，安全规范见 §6） │
+│  src/tools/      tool implementations (Pydantic input +        │
+│                   executor; security rules in §6)              │
 │    calc.py http_request.py file_write.py …                     │
 ├───────────────────────────────────────────────────────────────┤
-│  src/storage/    SQLite 持久化（含恢复锁/乐观并发版本号）          │
-│  src/models/     共享 Pydantic schema                           │
+│  src/storage/    SQLite persistence (incl. recovery lock /     │
+│                   optimistic-concurrency version)              │
+│  src/models/     shared Pydantic schemas                       │
 └───────────────────────────────────────────────────────────────┘
 ```
 
-**依赖方向**（强制，code-review 门禁项）：`api → services → agent → tools/storage`，`models` 被所有层引用，禁止反向 import。
+**Dependency direction** (mandatory, a code-review gate item): `api → services → agent → tools/storage`; `models` is referenced by every layer; reverse imports are forbidden.
 
-### 3.1 SSE 端点（GET /tasks/{id}/events）
+### 3.1 SSE endpoint (GET /tasks/{id}/events)
 
-- **公开事件类型**（收敛，完整枚举）：`status | tool_call | tool_result | error | final`。**不再存在 `thought` 事件**：模型内部推理不持久化到公开事件流（DB 事件表、JSONL、SSE 均不落 thought）。
-- **事件负载**：
-  - `tool_call`：`tool_call_id`、`tool_name`、参数摘要（截断长度上限，默认 512 字符）。
-  - `tool_result`：`tool_call_id`、成功/失败标志、结果摘要（截断长度上限，默认 512 字符）。
-  - `status`：任务状态变更（含迁移原因）。
-  - `error`：不可恢复/需注意的错误信息。
-  - `final`：任务终止时**必发一条**（含最终状态与结果摘要），客户端以此判定流结束。
-- **事件序号**：每任务 `seq` 单调递增（从 1 开始，由 storage 层在写入时原子分配）；SSE 消息的 `id:` 字段携带该 `seq`。
-- **断线重连**：端点支持 `Last-Event-ID` 请求头；重连后从该 `seq+1` 续传。事件**先落库（TaskEvent 表）再推送**，因此任意已持久化事件均可重放，不依赖内存缓冲。
-- 终态（completed/failed/cancelled）后端点发送 `final` 后正常关闭流；客户端重连到已终态任务时，服务端重放全部事件并以 `final` 结束。
+- **Public event types** (converged, complete enumeration): `status | tool_call | tool_result | error | final`. **There is no `thought` event any more**: model-internal reasoning is never persisted to the public event stream (neither the DB event table, JSONL, nor SSE records thoughts).
+- **Event payloads**:
+  - `tool_call`: `tool_call_id`, `tool_name`, an argument summary (truncation cap, default 512 characters).
+  - `tool_result`: `tool_call_id`, a success/failure flag, a result summary (truncation cap, default 512 characters).
+  - `status`: task-state changes (incl. the transition reason).
+  - `error`: unrecoverable / noteworthy error information.
+  - `final`: **always emitted exactly once** at task termination (with the final state and a result summary); clients use it to detect end-of-stream.
+- **Event sequence numbers**: a per-task `seq`, monotonically increasing (from 1, assigned atomically by the storage layer on write); the SSE message's `id:` field carries that `seq`.
+- **Reconnection**: the endpoint honors the `Last-Event-ID` request header; after reconnecting, streaming resumes from `seq+1`. Events are **persisted first (TaskEvent table), then pushed**, so any persisted event can be replayed without relying on an in-memory buffer.
+- On a terminal state (completed/failed/cancelled) the endpoint sends `final` and closes the stream normally; a client reconnecting to an already-terminal task gets all events replayed, ending with `final`.
 
-## 4. Agent 主循环设计（核心）
+## 4. Agent main-loop design (core)
 
 ```
-初始化: Task(goal) → LLM(系统提示+工具清单)
-循环 (≤ MAX_STEPS=25, 每步超时可配):
-  1. LLM 返回 tool_call(s) 或 final_answer
-     （模型可能附带内部推理文本，但不写入任何公开事件/持久化事件流）
-  2. 为每个调用分配稳定 tool_call_id → 持久化 checkpoint
-     → registry 校验参数 → executor 执行工具 → 捕获异常
-  3. 每次状态变更写 TaskEvent(type ∈ {status, tool_call, tool_result, error}, seq)
-  4. tool 结果作为 tool message 回传 LLM
-终止: final_answer | 达到步数上限 | 不可恢复错误
-      → Task.status = completed/failed + 发送 final 事件（必发）
+init: Task(goal) → LLM(system prompt + tool list)
+loop (≤ MAX_STEPS=25, per-step timeout configurable):
+  1. the LLM returns tool_call(s) or a final_answer
+     (the model may attach internal reasoning text, but it never
+      enters any public event / persisted event stream)
+  2. assign a stable tool_call_id per call → persist a checkpoint
+     → the registry validates arguments → the executor runs the tool → exceptions captured
+  3. every state change writes a TaskEvent(type ∈ {status, tool_call, tool_result, error}, seq)
+  4. the tool result goes back to the LLM as a tool message
+terminate: final_answer | step limit reached | unrecoverable error
+      → Task.status = completed/failed + emit the final event (always)
 ```
 
-- **真实 LLM**：工具选择由模型 tool-calling 决定，运行时无法预测下一步——这是与"静态规则模拟"的本质区别，e2e 测试断言行为不可硬编码。
-- **状态持久化**：Task/Step/ToolCall/TaskEvent 四表，每次状态变更即写库；进程重启后 `resume` 按 §5.1 恢复语义从 checkpoint 续跑。
-- **防护**：最大步数、单工具超时、工具异常不致命（错误回传 LLM 自纠）。
+- **Real LLM**: tool selection is decided by the model's tool-calling; the next step is unpredictable at runtime — this is the essential difference from "static rule simulation", and e2e tests must not hard-code behavior.
+- **State persistence**: the four tables Task/Step/ToolCall/TaskEvent, written on every state change; after a process restart, `resume` continues from a checkpoint per the §5.1 recovery semantics.
+- **Protections**: max steps, per-tool timeouts, tool exceptions are not fatal (errors go back to the LLM for self-correction).
 
-## 5. 数据模型（关键表/模型）
+## 5. Data model (key tables/models)
 
-- `Task`: id, goal, status(`pending|running|completed|failed|paused|cancelled`), result, version(乐观并发控制/执行 fencing token), created_at, updated_at
-- `Step`: id, task_id, seq(任务内步骤序号), tool_call_id（**无 thought 字段**——模型内部推理不采集，不持久化）
-- `ToolCall`: tool_call_id(稳定调用 ID), task_id, seq(任务级事件序号，与 TaskEvent.seq 同一序号空间，storage 写入时原子分配), tool_name, tool_args, status(`pending|running|succeeded|failed|uncertain`), result, error, idempotency(该调用**生效**幂等性的快照，见 §6.4), created_at, updated_at
-- `TaskEvent`: id, task_id, seq, type(`status|tool_call|tool_result|error|final`), payload(JSON), ts
+- `Task`: id, goal, status(`pending|running|completed|failed|paused|cancelled`), result, version (optimistic concurrency control / execution fencing token), created_at, updated_at
+- `Step`: id, task_id, seq (step number within the task), tool_call_id (**no thought field** — model-internal reasoning is neither collected nor persisted)
+- `ToolCall`: tool_call_id (stable call ID), task_id, seq (task-level event number, the same number space as TaskEvent.seq, assigned atomically by storage on write), tool_name, tool_args, status(`pending|running|succeeded|failed|uncertain`), result, error, idempotency (a snapshot of the **effective** idempotency of this call, see §6.4), created_at, updated_at
+- `TaskEvent`: id, task_id, seq, type(`status|tool_call|tool_result|error|final`), payload (JSON), ts
 
-任务状态机合法迁移：
+Legal task-state-machine transitions:
 
 ```
 pending → running → (completed | failed | paused | cancelled)
-pending → cancelled                       （未启动任务直接取消）
-paused  → running                         （resume，受恢复锁约束，见 §5.1）
-paused  → cancelled                       （等待确认中的任务可取消，见 §5.1 cancel 语义）
-running → cancelled                       （见 §5.1 cancel 语义）
+pending → cancelled                       (cancel an unstarted task directly)
+paused  → running                         (resume, recovery-lock governed, see §5.1)
+paused  → cancelled                       (a task awaiting confirmation can be cancelled, see §5.1 cancel semantics)
+running → cancelled                       (see §5.1 cancel semantics)
 ```
 
-`completed / failed / cancelled` 为终态，不可再迁移。
+`completed / failed / cancelled` are terminal states with no further transitions.
 
-事件序号 `seq`：每任务独立、单调递增、写入时由 storage 原子分配；同一任务内事件先落库再推送（SSE `id:` 携带，支持 `Last-Event-ID` 重放）。
+The event sequence number `seq`: per-task, monotonically increasing, assigned atomically by storage on write; within a task, events are persisted before being pushed (the SSE `id:` carries it; `Last-Event-ID` replay supported).
 
-### 5.1 任务恢复与幂等性
+### 5.1 Task recovery and idempotency
 
-**稳定调用 ID**：每次工具调用在派发前分配全局唯一的 `tool_call_id`（事件序号或 UUID，实现二选一、全程不变）。该 ID 是恢复、幂等判定、SSE 事件对齐与人工确认的唯一锚点。
+**Stable call IDs**: every tool call gets a globally unique `tool_call_id` assigned before dispatch (event-sequence or UUID — one implementation, invariant for the call's lifetime). This ID is the single anchor for recovery, idempotency decisions, SSE event alignment, and manual confirmation.
 
-**工具调用状态机**：
+**Tool-call state machine**:
 
 ```
 pending → running → (succeeded | failed | uncertain)
 ```
 
-- `succeeded/failed`：执行器正常返回（含工具自身的失败）。
-- `uncertain`：调用已发出但结果未知（如进程在执行中途被 kill、超时后无法确认是否已产生副作用）。
+- `succeeded/failed`: the executor returned normally (including the tool's own failures).
+- `uncertain`: the call was dispatched but the outcome is unknown (e.g. the process was killed mid-execution; after a timeout it cannot be confirmed whether side effects occurred).
 
-**checkpoint 语义**：checkpoint = 某工具调用进入 `running` **之前**持久化的完整上下文（任务状态 + 已完成步骤 + 待执行调用及其 tool_call_id）。恢复时以最后 checkpoint 为起点重建循环上下文。
+**Checkpoint semantics**: a checkpoint = the complete context persisted **before** a tool call enters `running` (task state + completed steps + the pending call with its tool_call_id). Recovery rebuilds the loop context from the last checkpoint.
 
-**幂等性分级**：工具注册表必须为每个工具声明 `idempotency: idempotent | non-idempotent`（见 §6.4）。恢复策略按状态 + 幂等性矩阵执行：
+**Idempotency tiers**: the tool registry must declare `idempotency: idempotent | non-idempotent` for every tool (see §6.4). The recovery policy follows the state × idempotency matrix:
 
-| 调用状态 | 幂等工具 | 非幂等工具 |
+| Call state | Idempotent tool | Non-idempotent tool |
 |----------|----------|------------|
-| `succeeded` | 直接复用已存结果，**不重执行** | 直接复用已存结果，**不重执行** |
-| `failed` | 由 LLM 决定是否换参数重试（**新调用 ID**） | 由 LLM 决定是否换参数重试（**新调用 ID**） |
-| `uncertain` | **可自动重试一次**（原调用 ID 重新入 running，事件流携带同一 tool_call_id + attempt 序号，前端按最新一轮渲染；重试仍 uncertain 则置 paused） | **禁止自动重试**：任务置 `paused`，等待用户确认 |
+| `succeeded` | reuse the stored result directly, **no re-execution** | reuse the stored result directly, **no re-execution** |
+| `failed` | the LLM decides whether to retry with new arguments (**a new call ID**) | the LLM decides whether to retry with new arguments (**a new call ID**) |
+| `uncertain` | **may auto-retry once** (the original call ID re-enters running; the event stream carries the same tool_call_id + an attempt number; the frontend renders the latest round; if the retry is still uncertain → paused) | **auto-retry forbidden**: the task goes `paused`, awaiting user confirmation |
 
-**恢复触发方式**：恢复为**手动触发**（`POST /tasks/{id}/resume`）；服务重启后**不自动扫描**中断任务。
+**Recovery triggering**: recovery is **manually triggered** (`POST /tasks/{id}/resume`); after a service restart, interrupted tasks are **not** auto-scanned.
 
-**人工确认 API**（uncertain 非幂等调用专用）：
+**Manual confirmation API** (for uncertain non-idempotent calls only):
 
 ```
 POST /tasks/{id}/tool-calls/{tool_call_id}/confirm
 body: { "action": "retry" | "skip" }
 ```
 
-- `retry`：用户确认该调用未产生副作用（或副作用可接受），以**新调用 ID** 重新执行并记录确认人/时间。
-- `skip`：将该调用标记 `failed`（error="skipped-by-user"），结果回传 LLM 由其决定后续步骤。
-- 任务确认后由 `paused → running`，继续受恢复锁约束。
+- `retry`: the user confirms the call produced no side effects (or they are acceptable); it re-executes under a **new call ID** with the confirmer/time recorded.
+- `skip`: the call is marked `failed` (error="skipped-by-user"); the result goes back to the LLM, which decides the next step.
+- After confirmation the task moves `paused → running`, still governed by the recovery lock.
 
-**任务取消（cancel）**：
+**Task cancellation (cancel)**:
 
 ```
 POST /tasks/{id}/cancel
 ```
 
-- 语义：**停止派发新调用**；所有 `pending` 调用标记 `failed`（error="cancelled"）；**进行中的 `running` 调用标记 `uncertain`**（因为无法确认其是否已产生副作用）。
-- 适用状态：`running | paused | pending`。对 `paused`（等待 uncertain 确认中）与 `pending`（未启动）任务，cancel 同样合法——无 `running` 调用时直接进入终态；`pending` 调用同样标记 failed(cancelled)。
-- 取消后任务进入终态 `cancelled`，发送 `final` 事件（含状态与已完成部分的结果摘要）。
-- 对被标记 `uncertain` 的非幂等调用，结果摘要中明确提示"副作用未知，已取消"，便于用户后续人工处置。**声明**：`cancelled` 为终态，其中的 uncertain 调用不提供系统内继续执行路径（confirm API 仅服务 paused 任务）；处置仅指用户在系统外核查副作用。
+- Semantics: **stop dispatching new calls**; all `pending` calls are marked `failed` (error="cancelled"); **in-flight `running` calls are marked `uncertain`** (because it cannot be confirmed whether they already produced side effects).
+- Applicable states: `running | paused | pending`. For `paused` (awaiting an uncertain confirmation) and `pending` (unstarted) tasks, cancel is equally legal — with no `running` calls the task goes straight to a terminal state; `pending` calls are likewise marked failed(cancelled).
+- After cancellation the task enters the terminal state `cancelled` and emits a `final` event (with the state and a result summary of the completed portion).
+- For non-idempotent calls marked `uncertain`, the result summary explicitly notes "side effects unknown, cancelled" so the user can handle them manually afterwards. **Declaration**: `cancelled` is terminal and its uncertain calls have no in-system continuation path (the confirm API serves only paused tasks); "handling" means the user verifying side effects outside the system.
 
-**并发恢复控制**：
+**Concurrent-recovery control**:
 
-- 同一任务**同时只允许一个活跃执行**。
-- 实现方式：Task 行的 `version` 字段做乐观并发控制——resume 请求在事务内校验并递增 version；`POST /tasks/{id}/resume` 对已持有恢复锁（version 与请求方不一致 / 已有活跃执行心跳）的任务返回 `409 Conflict`，**拒绝双重恢复**。
-- 活跃执行须周期性心跳（更新 `updated_at`）；心跳过期的持有方可被新 resume 抢占（仍走 version 乐观锁，保证只有一个赢家）。
-- **fencing（防僵尸执行方）**：活跃执行持有其获取的 version 值作为**执行 token**；每次派发工具调用与每次状态写库都必须携带该 token 做条件更新（`UPDATE … WHERE id=? AND version=?`，CAS 语义）。写库影响行数为 0 即检测到已被抢占（version 已被新持有方递增），旧执行方**立即自行终止派发并不再写库**（自杀）——即便心跳延迟导致其被误判死亡，也无法再产生双活跃执行的副作用。
+- Only **one active execution per task at a time**.
+- Implementation: optimistic concurrency control on the Task row's `version` field — a resume validates and increments the version inside a transaction; `POST /tasks/{id}/resume` returns `409 Conflict` for a task already holding the recovery lock (version mismatch with the requester / an active execution heartbeat exists), **rejecting double recovery**.
+- The active execution must heartbeat periodically (updating `updated_at`); a holder whose heartbeat expired can be preempted by a new resume (still via the version optimistic lock, guaranteeing a single winner).
+- **Fencing (against zombie executors)**: the active execution holds the version value it acquired as its **execution token**; every tool-call dispatch and every state write must carry that token as a conditional update (`UPDATE … WHERE id=? AND version=?`, CAS semantics). Zero rows affected means preemption was detected (a new holder has bumped the version); the old executor **immediately terminates dispatch and never writes again** (self-termination) — even if a delayed heartbeat got it wrongly declared dead, it can no longer produce the side effects of a double active execution.
 
-**测试要求**：以上恢复语义的验收项见 `docs/ACCEPTANCE_CRITERIA.md` M2（M2-5/M2-6/M2-7）。
+**Test requirements**: the acceptance items for these recovery semantics are in `docs/ACCEPTANCE_CRITERIA.md` M2 (M2-5/M2-6/M2-7).
 
-## 6. 工具安全规范
+## 6. Tool security rules
 
-### 6.1 calc — 安全表达式计算
+### 6.1 calc — safe expression evaluation
 
-- 基于 **AST 的安全表达式解析**（Python `ast` 模块）：只允许白名单节点——数字常量、二元运算（`+ - * / % **`）、一元运算（`+ -`）、白名单函数调用（`abs / min / max / round / sqrt` 等）。
-- **禁止** `eval` / `exec` / 名称解析（Name 节点一律拒绝，函数名只匹配白名单 Call）。
-- 限制表达式长度（默认 ≤ 256 字符）与运算深度（AST 深度默认 ≤ 32）。
+- **AST-based safe expression parsing** (the Python `ast` module): whitelist nodes only — numeric constants, binary operations (`+ - * / % **`), unary operations (`+ -`), whitelisted function calls (`abs / min / max / round / sqrt` etc.).
+- **Forbidden**: `eval` / `exec` / name resolution (Name nodes are always rejected; only whitelisted Call targets match function names).
+- Limits on expression length (default ≤ 256 characters) and operator depth (AST depth default ≤ 32).
 
-### 6.2 http_request — SSRF 防护
+### 6.2 http_request — SSRF protection
 
-- 协议：仅允许 `http` / `https`。
-- **域名白名单**（可通过配置项扩展，默认含示例域名）。
-- **IP 校验**：DNS 解析后对实际 IP 做校验，阻断私有/内网/保留地址：
-  - IPv4：`127.0.0.0/8`、`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`，及云元数据地址 `169.254.169.254`。
-  - IPv6：`::1`、`fc00::/7`、`fe80::/10`。
-- **resolve-then-connect（防 DNS rebinding TOCTOU）**：校验通过后**必须绑定该已校验 IP 直接建连**（HTTP `Host` 头保留原域名），**禁止连接时对域名二次解析**——否则攻击者可在校验与连接两次解析之间切换 DNS 应答绕过上述阻断。
-- **重定向**：禁止自动跟随未校验的重定向——每一跳都重新走"域名白名单 + IP 校验"全流程，校验不过即阻断；最大跳数上限（默认 3）。
-- 超时上限与响应大小上限（默认 10s / 1MB，超限截断并标记）。
-- 幂等性声明：**non-idempotent**（其中 GET 请求视为幂等，注册表以方法参数区分）。
+- Protocols: only `http` / `https` allowed.
+- **Host allow-list** (extensible via configuration; contains example hosts by default).
+- **IP validation**: after DNS resolution, the actual IPs are validated and private/intranet/reserved addresses are blocked:
+  - IPv4: `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, plus the cloud-metadata address `169.254.169.254`.
+  - IPv6: `::1`, `fc00::/7`, `fe80::/10`.
+- **resolve-then-connect (defends against the DNS-rebinding TOCTOU)**: after validation, the connection **must bind to the validated IP directly** (the HTTP `Host` header keeps the original hostname), and **resolving the hostname a second time at connect time is forbidden** — otherwise an attacker could switch the DNS answer between the validation and connection resolutions and bypass the blocks above.
+- **Redirects**: automatically following unvalidated redirects is forbidden — every hop re-runs the full "host allow-list + IP validation" chain; failing validation blocks the hop; a hop-count cap applies (default 3).
+- Timeout and response-size caps (default 10s / 1MB; overruns are truncated and flagged).
+- Idempotency declaration: **non-idempotent** (GET requests count as idempotent; the registry distinguishes by the method argument).
 
-### 6.3 file_write — 沙箱写入
+### 6.3 file_write — sandboxed writes
 
-- 写入范围限制在 workspace 的 **`data/` 沙箱目录**内。
-- 路径处理：**先规范化（`realpath`）再校验前缀**——规范化结果必须以沙箱根目录前缀开头，否则拒绝；显式拒绝含 `..` 的路径穿越。
-- **拒绝符号链接**：写入前用 `lstat` 检查目标路径**各级目录**不含符号链接，发现即拒绝。
-- 文件大小上限（默认 1MB）。
-- 幂等性声明：**non-idempotent**。
+- Writes are confined to the workspace's **`data/` sandbox directory**.
+- Path handling: **normalize first (`realpath`), then validate the prefix** — the normalized path must start with the sandbox root prefix, otherwise it is rejected; paths containing `..` are explicitly rejected as traversal.
+- **Symlinks rejected**: before writing, `lstat` checks that **every directory level** of the target path contains no symlink; any found → rejection.
+- File-size cap (default 1MB).
+- Idempotency declaration: **non-idempotent**.
 
-### 6.4 工具注册表新增字段
+### 6.4 New registry fields
 
-`src/agent/registry.py` 的注册声明在原有（name、description、Pydantic 参数 schema）基础上**必须**包含：
+The registration declarations in `src/agent/registry.py` **must** include, beyond the existing fields (name, description, Pydantic argument schema):
 
-| 字段 | 取值 | 说明 |
+| Field | Values | Notes |
 |------|------|------|
-| `idempotency` | `idempotent \| non-idempotent` | 恢复语义判定依据（§5.1），缺失即注册失败 |
-| `risk_level` | `low \| medium \| high` | 安全审计与 code-review 关注分级（如 file_write/http_request 为 medium 及以上） |
+| `idempotency` | `idempotent \| non-idempotent` | the basis of the §5.1 recovery decisions; missing → registration fails |
+| `risk_level` | `low \| medium \| high` | grading for security audits and code-review attention (e.g. file_write/http_request are medium and above) |
 
-**调用级有效幂等性**：恢复判定（§5.1 矩阵）采用**调用级有效幂等性** = 工具注册表的默认声明，可按参数规则覆写——如 `http_request` 默认声明 non-idempotent，但方法为 GET 时覆写为 idempotent。派发调用时把生效值快照写入 `ToolCall.idempotency` 字段，恢复时以该快照为准（不重新计算）。
+**Call-level effective idempotency**: recovery decisions (the §5.1 matrix) use the **call-level effective idempotency** = the registry's default declaration, overridable by argument rules — e.g. `http_request` declares non-idempotent by default but is overridden to idempotent when the method is GET. At dispatch, the effective value is snapshotted into `ToolCall.idempotency`; recovery uses that snapshot (never recomputed).
 
-## 7. 配置与密钥
+## 7. Configuration and secrets
 
-`.env`（gitignore）→ `pydantic-settings` 读取：
+`.env` (gitignored) → read by `pydantic-settings`:
 
 ```
-OPENAI_API_KEY=…          # 或 ANTHROPIC_API_KEY
-LLM_BASE_URL=…            # 可选，兼容端点
-LLM_MODEL=gpt-4o          # 默认模型
+OPENAI_API_KEY=…          # or ANTHROPIC_API_KEY
+LLM_BASE_URL=…            # optional, compatible endpoints
+LLM_MODEL=gpt-4o          # default model
 CALC_AGENT_MAX_STEPS=25
-CALC_AGENT_ENV_FILE=.env  # pydantic-settings 的 env_file 路径覆盖（默认 .env）
-HTTP_ALLOWED_HOSTS=…      # http_request 域名白名单（逗号分隔，默认含 example.com）
-DATA_SANDBOX_DIR=data/    # file_write 沙箱根
+CALC_AGENT_ENV_FILE=.env  # pydantic-settings env_file path override (default .env)
+HTTP_ALLOWED_HOSTS=…      # http_request host allow-list (comma-separated; contains example.com by default)
+DATA_SANDBOX_DIR=data/    # file_write sandbox root
 ```
 
-**`CALC_AGENT_ENV_FILE` 语义**：pydantic-settings 的 env_file 路径从该变量读取（默认 `.env`）。**设为 `/dev/null` 即完全绕开 .env 文件**——用于无 key 环境验收（M0-3/M1-1b/E2E-3）与测试 fixture，无需移动/删除真实 `.env`（环境变量仍优先于 env_file，二者双通道清理后才构成有效"无 key"判据）。
+**`CALC_AGENT_ENV_FILE` semantics**: pydantic-settings reads its env_file path from this variable (default `.env`). **Setting it to `/dev/null` bypasses the .env file entirely** — used for key-less acceptance (M0-3/M1-1b/E2E-3) and test fixtures, without moving/deleting a real `.env` (environment variables still take precedence over env_file; both channels must be cleared for a valid "no keys" condition).
 
-**红线**：任何密钥出现在代码/测试/日志中即 code-review Blocker。
+**Red line**: any secret appearing in code/tests/logs is a code-review Blocker.
 
-## 8. 可观测性
+## 8. Observability
 
-- 每次状态变更产出结构化 `TaskEvent`（DB，类型 ∈ `status|tool_call|tool_result|error|final`，见 §3.1）+ 同步 JSONL 追加（`logs/agent-<task_id>.jsonl`，含 seq）。**thought 不落任何观测通道。**
-- SSE 端点实时推送公开事件给前端时间线；`id:` 携带 seq，`Last-Event-ID` 支持断线续传（事件先落库再推送，可重放）。
-- 任务终止必发 `final` 事件（最终状态 + 结果摘要），客户端以 `final` 判定流结束。
-- 回放命令：`python -m cli.replay <task_id>` 按时间序打印完整轨迹。
+- Every state change produces a structured `TaskEvent` (DB; type ∈ `status|tool_call|tool_result|error|final`, see §3.1) + a synchronous JSONL append (`logs/agent-<task_id>.jsonl`, incl. seq). **Thoughts never enter any observability channel.**
+- The SSE endpoint pushes public events live to the frontend timeline; `id:` carries the seq; `Last-Event-ID` supports reconnection (events are persisted before being pushed, hence replayable).
+- Task termination always emits a `final` event (final state + result summary); clients use `final` to detect end-of-stream.
+- Replay command: `python -m cli.replay <task_id>` prints the full trace in time order.
 
-## 附录：ADR
+## Appendix: ADRs
 
-- **ADR-001 采用自研单循环而非框架**：需求（拆解/工具/状态/日志）均为单 Agent 语义，LangGraph 等引入的图编排与多 Agent 抽象是纯开销，违背约束 3。
-- **ADR-002 openai SDK 优先**：自定义 `base_url` 覆盖国内外多数兼容端点；LLMClient 抽象隔离供应商，换 anthropic 只动一个文件。
-- **ADR-003 SQLite 起步**：单文件、零部署；存储层走 repository 模式，迁移 Postgres 只换实现。
-- **ADR-004 断点恢复与幂等性语义**（v1.1，v1.2 修订）：为每次工具调用定义稳定 `tool_call_id` 与 `pending→running→(succeeded|failed|uncertain)` 状态机；checkpoint 在调用进入 running 前持久化完整上下文；恢复策略按"状态 × 幂等性"矩阵执行——succeeded 复用、failed 由 LLM 换参重试（新调用 ID）、uncertain 幂等工具可自动重试一次（同 ID + attempt 序号）、uncertain 非幂等工具禁止自动重试并置 paused 等待用户确认（confirm API）；cancel 停止派发并将进行中调用标记 uncertain（paused/pending 任务亦可取消）；同一任务同时只允许一个活跃执行（version 乐观并发控制，双重恢复返回 409）。**v1.2 补 fencing**：活跃执行持有 version 值作为执行 token，派发与写库均为携带 token 的 CAS 条件更新，写库零行命中即被抢占、旧执行方自行终止——即便心跳延迟导致误判死亡，也不会出现双活跃执行副作用。该语义是"安全恢复"与"危险重放"的分界线，宁可暂停等人，不可静默重复副作用。
-- **ADR-005 工具安全边界**（v1.1，v1.2 修订）：calc 走 AST 白名单节点解析，禁 eval/exec/名称解析，限表达式长度与运算深度；http_request 仅 http/https + 域名白名单 + DNS 解析后 IP 私有/保留段阻断（含 169.254.169.254 云元数据）+ **resolve-then-connect（校验通过的 IP 直接建连，禁止二次解析，防 DNS rebinding TOCTOU）** + 重定向逐跳重新校验 + 超时与响应大小上限；file_write 限定 data/ 沙箱、realpath 后前缀校验、拒绝 `..` 与各级目录符号链接、文件大小上限；注册表强制声明 `idempotency`（调用级有效幂等性 = 默认声明可按参数覆写，如 GET 覆写）与 `risk_level`。Agent 可自主执行不可信输入衍生的调用，安全边界必须在工具执行器内强制，而非依赖 LLM 自觉。
-- **ADR-006 公开事件模型（去 thought 化）**（v1.1）：公开事件类型收敛为 `status | tool_call | tool_result | error | final`；模型内部推理不持久化到任何公开通道（DB 事件表/JSONL/SSE）。理由：① thought 属于模型内部中间产物，暴露既无稳定契约价值也有内容风险；② 收敛后的事件类型可被前端与测试精确断言；③ tool_call/tool_result 以 `tool_call_id` 对齐、负载带截断上限，保证流的可解析与可重放。SSE `id:` 携带每任务单调递增 seq，`Last-Event-ID` 断线从 seq+1 续传（事件先落库再推送，可重放）；final 事件任务终止必发，作为客户端判定流结束的唯一信号。
+- **ADR-001 a self-built single loop instead of a framework**: the requirements (decomposition/tools/state/logs) are all single-agent semantics; the graph orchestration and multi-agent abstractions a LangGraph would bring are pure overhead and violate constraint 3.
+- **ADR-002 the openai SDK first**: a custom `base_url` covers most compatible endpoints domestic and abroad; the LLMClient abstraction isolates the provider — switching to anthropic touches one file.
+- **ADR-003 start with SQLite**: single file, zero deployment; the storage layer uses the repository pattern, so migrating to Postgres swaps one implementation.
+- **ADR-004 checkpoint-recovery and idempotency semantics** (v1.1, revised in v1.2): every tool call gets a stable `tool_call_id` and the `pending→running→(succeeded|failed|uncertain)` state machine; checkpoints persist the full context before a call enters running; the recovery policy follows the "state × idempotency" matrix — succeeded is reused, failed lets the LLM retry with new arguments (a new call ID), uncertain idempotent tools may auto-retry once (same ID + attempt number), uncertain non-idempotent tools must not auto-retry and go paused awaiting user confirmation (the confirm API); cancel stops dispatch and marks in-flight calls uncertain (paused/pending tasks can also be cancelled); only one active execution per task at a time (version-based optimistic concurrency; double recovery returns 409). **v1.2 adds fencing**: the active execution holds the version value as an execution token; dispatches and DB writes are CAS conditional updates carrying the token; zero rows affected means preemption and the old executor self-terminates — even with a delayed heartbeat wrongly declaring it dead, no double-execution side effects can occur. These semantics are the dividing line between "safe recovery" and "dangerous replay": rather pause for a human than silently repeat side effects.
+- **ADR-005 tool security boundaries** (v1.1, revised in v1.2): calc uses AST-whitelist node parsing, no eval/exec/name resolution, with expression-length and operator-depth limits; http_request is http/https only + a host allow-list + blocking of private/reserved IP ranges after DNS resolution (incl. 169.254.169.254 cloud metadata) + **resolve-then-connect (connect directly to the validated IP; a second resolution is forbidden, defending against the DNS-rebinding TOCTOU)** + per-hop redirect re-validation + timeout and response-size caps; file_write is confined to the data/ sandbox with realpath-then-prefix validation, rejection of `..` and of symlinks at any directory level, and a file-size cap; the registry mandates `idempotency` (call-level effective idempotency = the default declaration, overridable per arguments, e.g. the GET override) and `risk_level` declarations. An agent may autonomously execute calls derived from untrusted input, so the security boundary must be enforced inside the tool executors, not left to the LLM's good behavior.
+- **ADR-006 the public event model (de-thought-ified)** (v1.1): public event types converge to `status | tool_call | tool_result | error | final`; model-internal reasoning is never persisted to any public channel (DB event table/JSONL/SSE). Rationale: ① thoughts are model-internal intermediates — exposing them has neither stable contract value nor is it risk-free; ② the converged event types can be asserted precisely by the frontend and tests; ③ tool_call/tool_result align via `tool_call_id` and payloads carry truncation caps, keeping the stream parseable and replayable. The SSE `id:` carries the per-task monotonically increasing seq; `Last-Event-ID` reconnection resumes at seq+1 (events are persisted before being pushed, hence replayable); the final event is always emitted at task termination as the sole end-of-stream signal for clients.
 
-## 变更记录
+## Changelog
 
-### v1.0 → v1.1（按评审意见修订，修复 4 项关键 + 3 项次要）
+### v1.0 → v1.1 (revised per review feedback; fixed 4 key + 3 minor items)
 
-1. **断点恢复安全语义**（评审关键问题 1）：§5 数据模型新增 `ToolCall` 表与稳定 `tool_call_id`、调用状态机（含 `uncertain`）；新增 §5.1"任务恢复与幂等性"（checkpoint 语义、按幂等性分级的恢复策略矩阵、uncertain 非幂等工具禁止自动重试并置 paused 等待用户确认、confirm API、cancel 语义、并发恢复控制/乐观锁、M2 测试要求指向）。
-2. **工具安全边界**（评审关键问题 2）：新增 §6"工具安全规范"——calc AST 白名单、http_request SSRF 防护（IP 黑名单段、重定向逐跳校验）、file_write 沙箱与符号链接拒绝；§6.4 注册表新增 `idempotency`/`risk_level` 字段；§3 registry 描述同步。
-3. **事件模型去 thought 化 + SSE 机制**（评审关键问题 3）：§3.1 SSE 端点公开事件类型收敛为 `status|tool_call|tool_result|error|final`；`Step.thought` 从数据模型删除（标注不采集）；tool_call/tool_result 负载定义（tool_call_id + 截断摘要）；seq 单调递增、`id:` 携带、`Last-Event-ID` 续传、事件先落库再推送；final 必发；§4 主循环与 §8 可观测性同步修正。
-4. **运行时依赖清单**（评审次要问题 3）：§2.1 新增"运行时依赖与必要性"表格（fastapi/uvicorn/pydantic/pydantic-settings/pytest/pytest-asyncio/httpx/openai/pyright），声明除此之外不加依赖。
-5. API 端点清单新增 `POST /tasks/{id}/cancel` 与 `POST /tasks/{id}/tool-calls/{tool_call_id}/confirm`；任务状态机新增 `cancelled` 终态。
-6. 新增 ADR-004 / ADR-005 / ADR-006。
-7. 技术栈、其余章节随上述变更做一致性同步（无选型变更）。
+1. **Checkpoint-recovery security semantics** (review key issue 1): §5's data model gained the `ToolCall` table with stable `tool_call_id` and the call state machine (incl. `uncertain`); added §5.1 "Task recovery and idempotency" (checkpoint semantics, the idempotency-tiered recovery policy matrix, uncertain non-idempotent tools forbidden to auto-retry and paused awaiting user confirmation, the confirm API, cancel semantics, concurrent-recovery control/optimistic locking, and the pointer to the M2 test requirements).
+2. **Tool security boundaries** (review key issue 2): added §6 "Tool security rules" — the calc AST whitelist, http_request SSRF protection (IP range blacklist, per-hop redirect validation), the file_write sandbox and symlink rejection; §6.4 added the registry's `idempotency`/`risk_level` fields; the §3 registry description synchronized.
+3. **De-thought-ified event model + SSE mechanics** (review key issue 3): §3.1's SSE public event types converged to `status|tool_call|tool_result|error|final`; `Step.thought` was removed from the data model (marked as not collected); tool_call/tool_result payload definitions (tool_call_id + truncated summaries); a monotonically increasing seq carried by `id:`, `Last-Event-ID` resumption, events persisted before being pushed; final always emitted; §4's main loop and §8's observability synchronized.
+4. **Runtime dependency list** (review minor issue 3): §2.1 gained the "runtime dependencies and necessity" table (fastapi/uvicorn/pydantic/pydantic-settings/pytest/pytest-asyncio/httpx/openai/pyright), declaring nothing beyond it.
+5. The API endpoint list gained `POST /tasks/{id}/cancel` and `POST /tasks/{id}/tool-calls/{tool_call_id}/confirm`; the task state machine gained the `cancelled` terminal state.
+6. Added ADR-004 / ADR-005 / ADR-006.
+7. The technology stack and remaining sections were synchronized for consistency (no selection changes).
 
-### v1.1 → v1.2（按架构复审 + QA 验收标准检查两轮报告修订）
+### v1.1 → v1.2 (revised per the architecture review + QA acceptance-criteria check reports)
 
-1. **[P0-1]** §2.1 依赖白名单增补 `pytest-cov`（G-2 覆盖率门禁的 pytest 集成插件，dev 分组），消除 G-2 命令与依赖红线矛盾。
-2. **[M-3]** §6.2 补 resolve-then-connect：校验通过的 IP 直接用于建连（Host 头保留原域名），禁止二次解析，闭合 DNS rebinding TOCTOU 缺口；ADR-005 同步修订。
-3. **[M-4]** §5.1 并发恢复控制补 fencing：活跃执行持有 version 值作为执行 token，派发/写库均走 CAS 条件更新，零行命中即被抢占、自行终止；ADR-004 同步修订。
-4. **[M-5]** §5 任务状态机补 `paused → cancelled`（等待确认中可取消）与 `pending → cancelled`（未启动任务直接取消）；cancel 语义节明确适用状态与 cancelled 终态下 uncertain 调用无系统内继续执行路径的声明。
-5. **[P1-6 联动]** §7 新增 `CALC_AGENT_ENV_FILE` 配置（env_file 路径覆盖，`/dev/null` 即绕开 .env），为无 key 验收命令（M0-3/M1-1b/E2E-3）提供双通道清理的文档依据；`HTTP_ALLOWED_HOSTS` 注明默认含 example.com（E2E-1 前置）。
-6. **[Minor]** §6.4 补"调用级有效幂等性"规则（默认声明可按参数覆写，ToolCall.idempotency 为生效值快照）；§5.1 uncertain 幂等重试补"同 tool_call_id + attempt 序号，前端按最新一轮渲染"；明确恢复为手动触发（重启不自动扫描）；§5 补 Step.seq / ToolCall.seq 字段语义说明。
-7. 版本号 v1.1 → v1.2，本变更记录追加。
+1. **[P0-1]** §2.1's dependency allow-list gained `pytest-cov` (the pytest plugin behind coverage gate G-2, dev group), resolving the contradiction between the G-2 command and the dependency red line.
+2. **[M-3]** §6.2 gained resolve-then-connect: the validated IP is used directly for the connection (the Host header keeps the original hostname) and a second resolution is forbidden, closing the DNS-rebinding TOCTOU gap; ADR-005 synchronized.
+3. **[M-4]** §5.1's concurrent-recovery control gained fencing: the active execution holds the version value as an execution token; dispatches and DB writes are CAS conditional updates; zero rows affected means preemption and self-termination; ADR-004 synchronized.
+4. **[M-5]** §5's task state machine gained `paused → cancelled` (cancellable while awaiting confirmation) and `pending → cancelled` (direct cancellation of an unstarted task); the cancel-semantics section states the applicable states and the declaration that uncertain calls under the terminal cancelled state have no in-system continuation path.
+5. **[P1-6 linked]** §7 gained the `CALC_AGENT_ENV_FILE` configuration (env_file path override; `/dev/null` bypasses .env), providing the documentary basis for the dual-channel clearing in the key-less acceptance commands (M0-3/M1-1b/E2E-3); `HTTP_ALLOWED_HOSTS` notes the default includes example.com (a prerequisite of E2E-1).
+6. **[Minor]** §6.4 gained the "call-level effective idempotency" rule (the default declaration overridable per arguments; ToolCall.idempotency is the snapshot of the effective value); §5.1's uncertain idempotent retry gained "same tool_call_id + attempt number, the frontend renders the latest round"; recovery is explicitly manually triggered (no auto-scan on restart); §5 gained the Step.seq / ToolCall.seq field semantics.
+7. Version bumped v1.1 → v1.2; this changelog appended.

@@ -1,18 +1,18 @@
-"""B2 最小示例：从零生成一个可直接打开的可玩 HTML 游戏（无 LLM）。
+"""B2 minimal example: generate a directly openable playable HTML game from scratch (no LLM).
 
-流程（全部确定性）：
-  ExperimentSpec → ExperimentBundle（写盘 data/ 沙箱）
-  → GameSpec（validate_game 通过）→ render_game_html → data/games/example-game.html
+Flow (fully deterministic):
+  ExperimentSpec → ExperimentBundle (written into the data/ sandbox)
+  → GameSpec (passes validate_game) → render_game_html → data/games/example-game.html
 
-运行：
+Run:
     .venv/bin/python examples/run_game_render.py
 
-打开游戏：
-    用浏览器直接打开输出路径（file:// 直开，无网络、无外部资源）。
-    提示：浏览器原型计时为近似值，不用于正式数据收集。
+Open the game:
+    open the output path directly in a browser (file://, no network, no external resources).
+    Note: browser prototype timing is approximate; not for formal data collection.
 
-示例刻意通用：因素/水平/响应均为占位语义（item 的 red/blue 判断），
-不绑定任何认知实验范式。
+The example is deliberately generic: factors/levels/responses are placeholder semantics
+(a red/blue judgement on item), not bound to any cognitive paradigm.
 """
 
 from __future__ import annotations
@@ -58,13 +58,13 @@ def main() -> None:
     settings = Settings()
     sandbox = Path(settings.data_sandbox_dir)
 
-    # 1. 生成 ExperimentBundle 并写入 data/ 沙箱
+    # 1. build the ExperimentBundle and write it into the data/ sandbox
     bundle = build_bundle(ExperimentSpec.model_validate(DEMO_SPEC))
     bundle_target = validate_sandbox_path(BUNDLE_REL, sandbox)
     write_sandbox_file(bundle_target, json.dumps(bundle).encode("utf-8"))
     print(f"bundle written : {bundle_target}")
 
-    # 2. 构造 GameSpec（六项引用直接复制 bundle 实际值）并校验
+    # 2. build the GameSpec (the six references copied verbatim from the bundle) and validate it
     spec_part = bundle["spec"]  # type: ignore[index]
     repro = bundle["reproducibility"]  # type: ignore[index]
     game_config: dict[str, object] = {
@@ -99,7 +99,7 @@ def main() -> None:
     assert result.game_spec is not None
     print("gamespec valid : True")
 
-    # 3. 渲染可玩 HTML 并写入 data/ 沙箱
+    # 3. render the playable HTML and write it into the data/ sandbox
     html = render_game_html(bundle, result.game_spec)
     html_target = validate_sandbox_path(HTML_REL, sandbox)
     write_sandbox_file(html_target, html.encode("utf-8"))

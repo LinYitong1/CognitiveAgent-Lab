@@ -1,0 +1,57 @@
+# CI gate for CognitiveAgent Lab — mirrors the local scripts/check.sh six gates:
+#   G-1 pytest full suite, G-2 coverage command, G-3 secret scan,
+#   G-4 layering check, G-5a pyright, G-5b compileall.
+# No LLM keys are needed: all tests run against FakeLLM / deterministic engines.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e .
+          .venv/bin/pip install pytest pytest-asyncio pytest-cov pyright
+
+      - name: G-1 Full test suite (FakeLLM / deterministic, no keys)
+        env:
+          CALC_AGENT_ENV_FILE: /dev/null
+        run: .venv/bin/python -m pytest
+
+      - name: G-2 Coverage command runs
+        env:
+          CALC_AGENT_ENV_FILE: /dev/null
+        run: .venv/bin/python -m pytest --cov=src --cov-report=term-missing
+
+      - name: G-3 Secret scan (grep rc=1 passes)
+        run: |
+          grep -rniE "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
+          rc=$?
+          if [ "$rc" -eq 1 ]; then
+            echo "G-3 PASS: no hardcoded secrets"
+          else
+            echo "G-3 FAIL: suspected hardcoded secrets (grep rc=${rc})"
+            exit 1
+          fi
+
+      - name: G-4 Layering dependency check
+        run: .venv/bin/python -m scripts.check_layers
+
+      - name: G-5a Static type check (pyright)
+        run: .venv/bin/python -m pyright src/
+
+      - name: G-5b Syntax compile check
+        run: .venv/bin/python -m compileall -q src/

@@ -1,8 +1,8 @@
-"""PA-13 黄金文件测试（契约 §7.1 冻结 spec；-k golden / pytest tests/golden 命中）。
+"""PA-13 golden-file tests (contract §7.1 frozen spec; matched by -k golden / pytest tests/golden).
 
-逐字节比对（含 bundle_sha256）；generated_at 固定 "2026-01-01T00:00:00Z"（测试注入）。
-更新流程：UPDATE_GOLDEN=1 python -m pytest tests/golden → 人工 review diff → PR 说明
-（engine_spec_version 同步递增）。
+Byte-for-byte comparison (incl. bundle_sha256); generated_at fixed to "2026-01-01T00:00:00Z" (test injection).
+Update flow: UPDATE_GOLDEN=1 python -m pytest tests/golden → human review of the diff → PR notes
+(engine_spec_version must be bumped in sync).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from src.experiment.schemas import ExperimentSpec
 GOLDEN_PATH = Path(__file__).resolve().parent / "generic-2x2-seed7.json"
 FIXED_TIMESTAMP = "2026-01-01T00:00:00Z"
 
-# 契约 §7.1 冻结 spec（任何范式无关）
+# contract §7.1 frozen spec (paradigm-agnostic)
 GOLDEN_SPEC: dict[str, object] = {
     "schema_version": 1,
     "name": "generic-2x2",
@@ -43,19 +43,19 @@ GOLDEN_SPEC: dict[str, object] = {
 
 
 def test_golden_export_unchanged() -> None:
-    """build_bundle(spec, generated_at=固定值) → 落盘字节与 golden 逐字节一致（含 bundle_sha256）。"""
+    """build_bundle(spec, generated_at=fixed) → the on-disk bytes are byte-identical to golden (incl. bundle_sha256)."""
     spec = ExperimentSpec.model_validate(GOLDEN_SPEC)
     bundle = build_bundle(spec, generated_at=FIXED_TIMESTAMP)
     text = canonical_json(bundle)
 
     if os.environ.get("UPDATE_GOLDEN") == "1":
         GOLDEN_PATH.write_text(text, encoding="utf-8")
-        pytest.skip("golden 文件已重写——请人工 review diff 后提交（engine_spec_version 须同步递增）")
+        pytest.skip("golden file rewritten — human review of the diff is required before commit (engine_spec_version must be bumped in sync)")
 
     golden = GOLDEN_PATH.read_text(encoding="utf-8")
-    assert text == golden, "黄金文件逐字节 diff 不为空：生成结果相对基线发生变更"
+    assert text == golden, "golden-file byte diff is non-empty: the generated result changed relative to the baseline"
 
-    # 黄金文件自洽性（契约 §7.1）：48 试次、每组合 12（2+10）、每水平 24/24
+# golden-file self-consistency (contract §7.1): 48 trials, 12 per combo (2+10), 24/24 per level
     import json
 
     data = json.loads(golden)

@@ -1,4 +1,4 @@
-"""LLMClient（openai SDK 封装）与 LLMClientProtocol（FakeLLM 替换点，契约 §1.1）。"""
+"""LLMClient (openai SDK wrapper) and LLMClientProtocol (the FakeLLM swap point, contract §1.1)."""
 
 from __future__ import annotations
 
@@ -10,40 +10,40 @@ from openai import AsyncOpenAI
 from src.config import Settings
 from src.models.llm import LLMResponse, ToolCallRequest
 
-Message = dict[str, Any]  # OpenAI chat 消息 JSON 格式（system / user / assistant(tool_calls) / tool）
+Message = dict[str, Any]  # OpenAI chat message JSON shape (system / user / assistant(tool_calls) / tool)
 
 
 class LLMProtocolError(Exception):
-    """供应商响应不符合协议（如 tool_call 参数非合法 JSON）——不可恢复，任务 failed。"""
+    """Provider response violates the protocol (e.g. tool_call arguments not valid JSON) — unrecoverable, task failed."""
 
 
 class LLMClientProtocol(Protocol):
-    """AgentLoop 的依赖类型（鸭子类型：任何实现该签名的对象可注入——FakeLLM 替换点）。"""
+    """Dependency type of AgentLoop (duck typing: any object implementing this signature can be injected — the FakeLLM swap point)."""
 
     async def chat(self, messages: list[Message], tools: list[dict[str, Any]]) -> LLMResponse: ...
 
 
 class LLMClient:
-    """openai.AsyncOpenAI 封装，实现 LLMClientProtocol。"""
+    """openai.AsyncOpenAI wrapper implementing LLMClientProtocol."""
 
     def __init__(self, settings: Settings, timeout: float = 60.0, max_retries: int = 2) -> None:
-        """key 为空时不在构造期抛错——由调用方（run_agent / M2 服务层）显式校验。
+        """An empty key does not raise at construction — callers (run_agent / the M2 service layer) check explicitly.
 
-        timeout 与 max_retries 透传给 SDK（网络错误/超时重试由 openai SDK 承担）。
+        timeout and max_retries are passed through to the SDK (network error/timeout retries handled by the openai SDK).
         """
         self._model = settings.llm_model
         self._client = AsyncOpenAI(
             api_key=settings.openai_api_key,
-            base_url=settings.llm_base_url or None,  # 兼容端点切换（ADR-002）
+            base_url=settings.llm_base_url or None,  # compatible-endpoint switching (ADR-002)
             timeout=timeout,
             max_retries=max_retries,
         )
 
     async def chat(self, messages: list[Message], tools: list[dict[str, Any]]) -> LLMResponse:
-        """调用 chat.completions.create 并转为统一 LLMResponse。
+        """Call chat.completions.create and convert to the unified LLMResponse.
 
-        - tool_call 参数 JSON 解析失败 → LLMProtocolError（loop 视为不可恢复）；
-        - SDK 重试耗尽后抛出的异常原样上抛，由 loop 捕获终止。
+        - tool_call arguments failing JSON parse → LLMProtocolError (treated as unrecoverable by the loop);
+        - exceptions raised by the SDK after retries are exhausted propagate as-is; the loop catches them and terminates.
         """
         response = await self._client.chat.completions.create(
             model=self._model,

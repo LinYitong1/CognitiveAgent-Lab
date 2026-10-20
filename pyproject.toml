@@ -16,7 +16,7 @@ dependencies = [
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-# src/ 本身是顶层包（import 路径为 src.xxx，为冻结 M1/Phase A 代码零改动而保留）
+# src/ itself is the top-level package (import path is src.xxx, kept for zero changes to frozen M1/Phase A code)
 [tool.setuptools.packages.find]
 include = ["src*"]
 
@@ -39,6 +39,6 @@ markers = [
 ]
 
 [tool.pyright]
-# 显式指定解释器环境，保证 `pyright src/` 解析到 .venv 的依赖
+# explicit interpreter environment so `pyright src/` resolves dependencies from .venv
 venvPath = "."
 venv = ".venv"

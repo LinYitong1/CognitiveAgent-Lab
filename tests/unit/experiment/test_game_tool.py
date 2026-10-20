@@ -1,6 +1,6 @@
-"""B1 单元测试：validate_game 工具（契约 §10 BT-1~BT-3、BT-5）。
+"""B1 unit tests: the validate_game tool (contract §10 BT-1~BT-3, BT-5).
 
-fixture 通用性：合法 GameSpec 从黄金 Bundle 动态派生（同 B0 测试模式）。
+Fixture genericity: the legal GameSpec is derived dynamically from the golden bundle (same pattern as the B0 tests).
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ def _settings(sandbox: Path) -> Settings:
 
 
 def _game_config(bundle: dict[str, object]) -> dict[str, object]:
-    """合法 GameSpec（引用黄金 Bundle 真实六项指纹）。"""
+    """Legal GameSpec (referencing the golden bundle's real six fingerprints)."""
     spec_part = bundle["spec"]  # type: ignore[index]
     repro = bundle["reproducibility"]  # type: ignore[index]
     responses = spec_part["responses"]  # type: ignore[index]
@@ -87,7 +87,7 @@ async def _run(settings: Settings, **kwargs: object) -> object:
     return await spec.executor(args)
 
 
-# ---------- BT-1 工具级：BLOCKED ----------
+# ---------- BT-1 tool-level: BLOCKED ----------
 
 
 @pytest.mark.asyncio
@@ -150,7 +150,7 @@ async def test_bt1_bundle_not_object(sandbox: Path) -> None:
     assert "BLOCKED: bundle must be a JSON object" in result.error
 
 
-# ---------- BT-2 领域级：结构化报告（ok=True + valid:false） ----------
+# ---------- BT-2 domain-level: structured report (ok=True + valid:false) ----------
 
 
 @pytest.mark.asyncio
@@ -159,7 +159,7 @@ async def test_bt2_invalid_game_spec_structured_report(sandbox: Path) -> None:
     config = _game_config(bundle)
     config["experiment_ref"]["seed"] = 999  # type: ignore[index]
     result = await _run(_settings(sandbox), game_config=config, bundle_path=BUNDLE_REL_PATH)
-    assert result.ok is True  # 领域级失败不带 ERROR 前缀
+    assert result.ok is True  # domain-level failures carry no ERROR prefix
     payload = json.loads(str(result.result))
     assert payload["valid"] is False
     assert payload["stalled"] is False
@@ -229,7 +229,7 @@ async def test_bt3_not_stalled_on_first_submission(sandbox: Path) -> None:
     assert payload["stalled"] is False
 
 
-# ---------- BT-5 ToolSpec 元数据 / tools schema / 组合器 ----------
+# ---------- BT-5 ToolSpec metadata / tools schema / combinator ----------
 
 
 def test_bt5_toolspec_metadata() -> None:
@@ -245,13 +245,13 @@ def test_bt5_toolspec_metadata() -> None:
 def test_bt5_registry_registers_validate_game() -> None:
     registry = build_game_registry(Settings(data_sandbox_dir="data/.test-sandbox/game-tool"))
     names = {s["function"]["name"] for s in registry.get_schemas()}
-    # M1 三工具 + 实验三工具 + validate_game = 7（B1 冻结集；B2 追加 render_game 后为 8）
+    # M1 three + experiment three + validate_game = 7 (the B1 frozen set; 8 after B2 appended render_game)
     assert {
         "calc", "http_request", "file_write",
         "validate_experiment", "generate_trials", "export_experiment",
         "validate_game",
     } <= names
-    assert "render_game" in names  # B2 契约 §11.8：组合器追加注册 render_game
+    assert "render_game" in names  # B2 contract §11.8: the combinator additionally registers render_game
 
 
 def test_bt5_description_reaches_tools_schema() -> None:

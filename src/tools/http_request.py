@@ -1,9 +1,9 @@
-"""http_request 工具：SSRF 防护六步安全链路（契约 §2.2；ARCHITECTURE §6.2 / ADR-005）。
+"""http_request tool: the SSRF-protected six-step security chain (contract §2.2; ARCHITECTURE §6.2 / ADR-005).
 
-实现说明（契约 §2.2 链路 4 允许"等价物"）：不依赖 httpx transport 的 DNS 行为，
-改用手写最小 HTTP/1.1 客户端——``asyncio.open_connection`` 原生支持连接地址与
-``server_hostname`` 分离，天然满足 resolve-then-connect 与 HTTPS SNI/证书校验
-以原域名进行（未使用 verify=False）。
+Implementation note (contract §2.2 chain step 4 allows an "equivalent"): this tool does not rely on httpx
+transport DNS behavior but uses a hand-written minimal HTTP/1.1 client — ``asyncio.open_connection``
+natively separates the connect address from ``server_hostname``, naturally satisfying
+resolve-then-connect with HTTPS SNI/certificate validation against the original hostname (no verify=False).
 """
 
 from __future__ import annotations
@@ -29,12 +29,12 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
-# DNS 解析步骤抽象（可注入——FakeResolver 是 M1-5 rebinding 用例的测试通道）
+# DNS-resolution step abstraction (injectable — FakeResolver is the test channel for the M1-5 rebinding case)
 Resolver = Callable[[str, int], list[IPAddress]]
 
 
 class Reader(Protocol):
-    """读取侧最小接口（asyncio.StreamReader 结构兼容）。"""
+    """Minimal read-side interface (structurally compatible with asyncio.StreamReader)."""
 
     async def readline(self) -> bytes: ...
 
@@ -44,7 +44,7 @@ class Reader(Protocol):
 
 
 class Writer(Protocol):
-    """写入侧最小接口（asyncio.StreamWriter 结构兼容）。"""
+    """Minimal write-side interface (structurally compatible with asyncio.StreamWriter)."""
 
     def write(self, data: bytes) -> None: ...
 
@@ -55,19 +55,19 @@ class Writer(Protocol):
     async def wait_closed(self) -> None: ...
 
 
-# 连接步骤抽象（可注入——测试用 FakeReader/FakeWriter 断言实际连接目标）
+# Connect-step abstraction (injectable — tests use FakeReader/FakeWriter to assert the actual connect target)
 Connector = Callable[[str, int, bool, "str | None"], Awaitable[tuple[Reader, Writer]]]
 
 
 class HttpRequestInput(BaseModel):
-    """http_request 参数（M1 仅 GET）。"""
+    """http_request arguments (M1: GET only)."""
 
     url: str
     method: Literal["GET"] = "GET"
 
 
 class HttpRequestToolSpec(ToolSpec):
-    """http_request 专用 spec：GET 覆写为 idempotent（ARCHITECTURE §6.4 调用级覆写）。"""
+    """http_request-specific spec: GET is overridden to idempotent (ARCHITECTURE §6.4 call-level override)."""
 
     def effective_idempotency(self, args: dict[str, Any]) -> Literal["idempotent", "non-idempotent"]:
         if args.get("method", "GET") == "GET":
@@ -76,11 +76,11 @@ class HttpRequestToolSpec(ToolSpec):
 
 
 class _HttpBlocked(Exception):
-    """安全拒绝（→ BLOCKED: 前缀）。"""
+    """Security refusal (→ BLOCKED: prefix)."""
 
 
 def _default_resolver(hostname: str, port: int) -> list[IPAddress]:
-    """默认 DNS 解析：getaddrinfo 全量地址。"""
+    """Default DNS resolution: all getaddrinfo addresses."""
     results: list[IPAddress] = []
     for info in socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM):
         sockaddr = info[4]
@@ -89,10 +89,10 @@ def _default_resolver(hostname: str, port: int) -> list[IPAddress]:
 
 
 async def _default_connector(ip: str, port: int, tls: bool, server_hostname: str | None) -> tuple[Reader, Writer]:
-    """默认连接器：直接绑定已校验 IP 建连（resolve-then-connect）。
+    """Default connector: bind directly to the validated IP (resolve-then-connect).
 
-    HTTPS：server_hostname=原域名 → TLS SNI 与证书校验均以原域名进行；
-    连接地址为已校验 IP，不发生二次解析。
+    HTTPS: server_hostname=original host → TLS SNI and certificate validation both use the original hostname;
+    the connect address is the validated IP; no second resolution happens.
     """
     if tls:
         if server_hostname is None:
@@ -107,7 +107,7 @@ async def _default_connector(ip: str, port: int, tls: bool, server_hostname: str
 
 
 def _ip_allowed(ip: IPAddress) -> bool:
-    """私有/保留/环回/链路本地（含云元数据 169.254.169.254）/组播/未指定一律拒绝。"""
+    """Private/reserved/loopback/link-local (incl. cloud metadata 169.254.169.254)/multicast/unspecified are all rejected."""
     return not (
         ip.is_private
         or ip.is_loopback
@@ -121,9 +121,9 @@ def _ip_allowed(ip: IPAddress) -> bool:
 def _validate_and_resolve(
     url: str, allowed_hosts: list[str], resolver: Resolver
 ) -> tuple[str, int, bool, str, str]:
-    """链路 1~3：URL 解析 → 域名白名单 → DNS 全量 IP 校验。
+    """Chain steps 1~3: URL parse → host allow-list → DNS full-IP validation.
 
-    返回 (hostname, port, tls, 已校验 IP, 请求目标 path?query)。
+    Returns (hostname, port, tls, validated IP, request target path?query).
     """
     try:
         parts = urllib.parse.urlsplit(url)
@@ -138,14 +138,14 @@ def _validate_and_resolve(
     if parts.username is not None or parts.password is not None:
         raise _HttpBlocked("URL userinfo not allowed")
     hostname = hostname.lower()
-    if hostname not in allowed_hosts:  # 精确匹配，先于 DNS
+    if hostname not in allowed_hosts:  # exact match, before DNS
         raise _HttpBlocked(f"host not allowed: {hostname}")
     if port is None:
         port = 443 if parts.scheme == "https" else 80
     addresses = resolver(hostname, port)
     if not addresses:
         raise _HttpBlocked(f"DNS resolution returned no addresses for {hostname}")
-    for address in addresses:  # 全量校验，任一违规整条拒绝（防多记录 rebinding）
+    for address in addresses:  # validate all; any violation rejects the whole set (blocks multi-record rebinding)
         if not _ip_allowed(address):
             raise _HttpBlocked(f"non-public IP address: {address}")
     target = parts.path or "/"
@@ -155,7 +155,7 @@ def _validate_and_resolve(
 
 
 async def _read_body(reader: Reader, headers: dict[str, str]) -> tuple[bytes, bool]:
-    """读响应体：chunked / content-length / 读到 EOF；累计 ≤1MB，超限截断。"""
+    """Read the response body: chunked / content-length / read to EOF; total ≤1MB, truncated beyond."""
     body = bytearray()
     truncated = False
     if headers.get("transfer-encoding", "").strip().lower() == "chunked":
@@ -193,7 +193,7 @@ async def _read_body(reader: Reader, headers: dict[str, str]) -> tuple[bytes, bo
             body += chunk
             remaining -= len(chunk)
         return bytes(body), truncated
-    while True:  # 无长度指示，读到 EOF
+    while True:  # no length indication, read to EOF
         chunk = await reader.read(65536)
         if not chunk:
             break
@@ -211,13 +211,13 @@ async def _single_request(
     resolver: Resolver,
     connector: Connector,
 ) -> tuple[int, dict[str, str], bytes, bool]:
-    """单跳请求：校验 → 连已校验 IP → 发送 → 读响应。"""
+    """Single-hop request: validate → connect to the validated IP → send → read the response."""
     hostname, port, tls, ip, target = _validate_and_resolve(url, allowed_hosts, resolver)
     reader, writer = await connector(ip, port, tls, hostname if tls else None)
     try:
         request = (
             f"GET {target} HTTP/1.1\r\n"
-            f"Host: {hostname}\r\n"  # Host 头保留原域名
+            f"Host: {hostname}\r\n"  # the Host header keeps the original hostname
             "User-Agent: cognitive-agent-lab/0.1\r\n"
             "Accept: */*\r\n"
             "Connection: close\r\n"
@@ -249,7 +249,7 @@ async def _single_request(
         try:
             await writer.wait_closed()
         except Exception:
-            pass  # fake/已断开连接的清理失败不影响结果
+            pass  # a fake/disconnected cleanup failure does not affect the result
 
 
 async def _get(
@@ -258,7 +258,7 @@ async def _get(
     resolver: Resolver,
     connector: Connector,
 ) -> ToolResult:
-    """完整 GET：重定向手动逐跳 ≤3，每跳重新走完整安全链路。"""
+    """Full GET: redirects followed manually hop by hop, ≤3 hops; every hop re-runs the full security chain."""
     current = url
     hops = 0
     while True:
@@ -270,7 +270,7 @@ async def _get(
             if hops >= MAX_REDIRECTS:
                 raise _HttpBlocked(f"redirect limit exceeded (> {MAX_REDIRECTS} hops)")
             hops += 1
-            # 相对 Location 以当前 URL 解析为绝对（RFC 3986）
+            # a relative Location is resolved against the current URL to absolute (RFC 3986)
             current = urllib.parse.urljoin(current, headers["location"])
             continue
         text = body.decode("utf-8", errors="replace")
@@ -306,7 +306,7 @@ def build_tool_spec(
     resolver: Resolver | None = None,
     connector: Connector | None = None,
 ) -> ToolSpec:
-    """构造 http_request 的 ToolSpec；resolver/connector 为测试注入点。"""
+    """Build http_request's ToolSpec; resolver/connector are test injection points."""
     allowed_hosts = settings.allowed_hosts
     effective_resolver = resolver if resolver is not None else _default_resolver
     effective_connector = connector if connector is not None else _default_connector
@@ -318,7 +318,7 @@ def build_tool_spec(
 
     return HttpRequestToolSpec(
         name="http_request",
-        description="向白名单域名发起 HTTP GET 请求并返回响应文本（重定向逐跳校验，上限 3 跳）",
+        description="Issue an HTTP GET request to an allow-listed host and return the response text (redirects validated hop by hop, limit 3)",
         input_model=HttpRequestInput,
         idempotency="non-idempotent",
         risk_level="medium",

@@ -1,9 +1,9 @@
-"""PA-3 约束与频数 + PA-6 UNSAT/SEARCH_EXHAUSTED 语义测试（契约 §7）。
+"""PA-3 constraints and frequencies + PA-6 UNSAT/SEARCH_EXHAUSTED semantics tests (contract §7).
 
-PA-3 选择器：-k "c1 or c2 or c3 or ratio or remainder or mismatch or mutex or
+PA-3 selector: -k "c1 or c2 or c3 or ratio or remainder or mismatch or mutex or
 filter_empty or correct_from or paradigm or unsupported"
-PA-6 选择器：-k "unsat or search_exhausted"
-频数断言全部为精确整数（OUT-6：不用卡方等统计增强）。
+PA-6 selector: -k "unsat or search_exhausted"
+All frequency assertions are exact integers (OUT-6: no chi-square-style statistical strengthening).
 """
 
 from __future__ import annotations
@@ -77,17 +77,17 @@ def test_c1_conflict() -> None:
 
 
 def test_c2_weight_ignored_both_cases() -> None:
-    # 情形①：balance=true 且显式 weight≠1.0
+    # case ①: balance=true with an explicit weight ≠ 1.0
     config = dict(BASE_SPEC)
     config["factors"] = [
         {"name": "difficulty", "levels": [{"name": "easy", "weight": 2.0}, {"name": "hard"}]},
         {"name": "modality", "levels": [{"name": "visual"}, {"name": "audio"}]},
     ]
     result = validate_spec(config)
-    assert result.valid  # 警告不影响 valid 判定
+    assert result.valid  # warnings do not affect the valid decision
     assert WarningCode.WEIGHT_IGNORED in _warning_codes(config)
 
-    # 情形②：balance=false 且 ratios 声明因素上存在显式 weight≠1.0
+    # case ②: balance=false with an explicit weight ≠ 1.0 on a ratios-declared factor
     config = dict(BASE_SPEC)
     config["factors"] = [
         {"name": "difficulty", "levels": [{"name": "easy", "weight": 3.0}, {"name": "hard", "weight": 1.0}]},
@@ -103,7 +103,7 @@ def test_c2_weight_ignored_both_cases() -> None:
 
 
 def test_c3_ratio_priority() -> None:
-    """ratios 覆盖 Level.weight：weights 3:1 被 ratios 0.5:0.5 覆盖 → 48/48。"""
+    """ratios override Level.weight: weights 3:1 overridden by ratios 0.5:0.5 → 48/48."""
     config = dict(BASE_SPEC)
     config["factors"] = [
         {"name": "difficulty", "levels": [{"name": "easy", "weight": 3.0}, {"name": "hard", "weight": 1.0}]},
@@ -139,11 +139,11 @@ def test_ratio_sum() -> None:
 
 
 def test_ratio_rounded_warning() -> None:
-    """10 试次 4 组合 → 3/3/2/2 + RATIO_ROUNDED 警告在场。"""
+    """10 trials / 4 combos → 3/3/2/2 + the RATIO_ROUNDED warning present."""
     config = dict(BASE_SPEC)
     config["blocks"] = [{"name": "main", "trial_count": 10}]
     result = validate_spec(config)
-    assert result.valid  # 警告不是错误、更不是 UNSAT
+    assert result.valid  # a warning is not an error, let alone UNSAT
     assert WarningCode.RATIO_ROUNDED in _warning_codes(config)
 
     gen = generate_trials(_spec(config))
@@ -151,17 +151,17 @@ def test_ratio_rounded_warning() -> None:
     for trial in gen.trials:
         key = f"{trial.factors['difficulty']}|{trial.factors['modality']}"
         combo_counts[key] = combo_counts.get(key, 0) + 1
-    # 声明序：easy|visual, easy|audio, hard|visual, hard|audio → 余量按声明序给前 2 个
+    # declaration order: easy|visual, easy|audio, hard|visual, hard|audio → the remainder goes to the first 2 in declaration order
     assert combo_counts == {"easy|visual": 3, "easy|audio": 3, "hard|visual": 2, "hard|audio": 2}
 
 
 def test_largest_remainder_math() -> None:
-    """频数和 == trial_count；每组合 count ∈ {floor, floor+1}；余数按 fractional 降序/声明序分配。"""
-    # 精确整数向量：100 试次、权重 [0.5, 0.3, 0.2] → [50, 30, 20]
+    """Frequency sum == trial_count; each combo count ∈ {floor, floor+1}; remainders allocated by fractional descending / declaration order."""
+    # exact integer vectors: 100 trials, weights [0.5, 0.3, 0.2] → [50, 30, 20]
     assert largest_remainder_counts(100, [0.5, 0.3, 0.2]) == [50, 30, 20]
-    # 并列按声明序：10 试次 4 等权 → 前 2 个组合 +1
+    # ties broken by declaration order: 10 trials / 4 equal weights → the first 2 combos get +1
     assert largest_remainder_counts(10, [0.25, 0.25, 0.25, 0.25]) == [3, 3, 2, 2]
-    # 多组固定 seed 的端到端频数（balance，2x2）
+    # end-to-end frequencies for several fixed seeds (balance, 2x2)
     for seed in (0, 1, 7, 42, 2**63 - 1):
         config = dict(DEMO_SPEC, seed=seed)
         gen = generate_trials(_spec(config))
@@ -171,7 +171,7 @@ def test_largest_remainder_math() -> None:
             for factor, level in trial.factors.items():
                 frequency.setdefault(factor, {}).setdefault(level, 0)
                 frequency[factor][level] += 1
-        # Demo spec 自洽性：每组合 26（2+24）、每水平 52/52
+    # demo-spec self-consistency: 26 per combo (2+24), 52/52 per level
         assert frequency["difficulty"] == {"easy": 52, "hard": 52}
         assert frequency["modality"] == {"visual": 52, "audio": 52}
         per_block: dict[str, dict[str, int]] = {}
@@ -184,7 +184,7 @@ def test_largest_remainder_math() -> None:
 
 
 def test_trial_count_mismatch() -> None:
-    """ratios 置 0 + filter 圈定构造：block 只剩权重 0 的组合。"""
+    """ratios set to 0 + filter scoping: the block is left with only weight-0 combos."""
     config = dict(BASE_SPEC)
     config["constraints"] = {
         "balance": False,
@@ -199,7 +199,7 @@ def test_trial_count_mismatch() -> None:
 
 
 def test_mutex_violation_empty() -> None:
-    """互斥声明使可用组合为空（2x2 全部 4 对互斥）。"""
+    """Mutex declarations empty the available combination space (all 4 pairs of a 2x2 mutually exclusive)."""
     config = dict(BASE_SPEC)
     config["constraints"] = {
         "balance": True,
@@ -247,7 +247,7 @@ def test_unknown_paradigm() -> None:
     result = validate_spec(config)
     assert not result.valid
     issue = next(e for e in result.errors if e.error_code == ErrorCode.UNKNOWN_PARADIGM)
-    assert "Phase A 未实现插件系统" in issue.message
+    assert "Phase A has no plugin system" in issue.message
     assert issue.suggestion
 
 
@@ -262,7 +262,7 @@ def test_unsupported_constraint_max_repeat() -> None:
 
 
 def test_unsat_error_code_mapping() -> None:
-    """§4.4 表中 UNSAT 类逐码触发断言（不含 SEARCH_EXHAUSTED——Phase A 不可触发）。"""
+    """Per-code trigger assertions for the UNSAT class of the §4.4 table (excluding SEARCH_EXHAUSTED — not triggerable in Phase A)."""
     fixtures: dict[str, dict[str, object]] = {
         ErrorCode.CONSTRAINT_CONFLICT: {
             "constraints": {
@@ -298,16 +298,16 @@ def test_unsat_error_code_mapping() -> None:
         result = validate_spec(config)
         assert not result.valid, expected_code
         issue = next(e for e in result.errors if e.error_code == expected_code)
-        assert issue.message, expected_code  # message 含实际值且非空
+        assert issue.message, expected_code  # message contains actual values and is non-empty
         assert issue.suggestion, expected_code
 
 
 def test_search_exhausted_framework_capability() -> None:
-    """声明性弱断言（契约 PA-6 如实标注局限）：
+    """Declarative weak assertion (contract PA-6 honestly notes the limitation):
 
-    Phase A 约束集无搜索路径，SEARCH_EXHAUSTED 不可触发；本条只断言框架能力在场
-    （错误码枚举、Settings 字段、generate_trials 签名），真实触发测试随 Phase B
-    max_repeat 序列约束进入。
+    the Phase A constraint set has no search path, so SEARCH_EXHAUSTED is not triggerable; this test only asserts the
+    framework capability is present (error-code enum, Settings field, generate_trials signature); a real trigger test
+    arrives with Phase B's max_repeat sequence constraints.
     """
     assert ErrorCode.SEARCH_EXHAUSTED == "SEARCH_EXHAUSTED"
     settings = Settings()
@@ -319,14 +319,14 @@ def test_search_exhausted_framework_capability() -> None:
 
 
 def test_mutex_static_filter_and_allocation_helpers() -> None:
-    """CR-4 静态组合过滤 + allocation per-block 口径（供 QA 排查的补充断言）。"""
+    """CR-4 static combination filtering + the allocation per-block basis (supplementary assertions for QA investigation)."""
     config = dict(BASE_SPEC)
     config["constraints"] = {"balance": True, "mutually_exclusive": [["easy", "visual"]]}
     spec = _spec(config)
     full = spec.expanded_combinations()
     assert len(full) == 4
     filtered = filter_mutex(full, mutex_pairs(spec))
-    assert len(filtered) == 3  # easy|visual 被剔除
+    assert len(filtered) == 3  # easy|visual is removed
     weights = effective_weights(spec)
     alloc = block_allocation(spec, spec.blocks[0], filtered, weights)
     assert {"|".join(k): v for k, v in alloc} == {"easy|audio": 32, "hard|visual": 32, "hard|audio": 32}

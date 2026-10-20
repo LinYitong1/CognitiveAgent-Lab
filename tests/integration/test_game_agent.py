@@ -1,10 +1,10 @@
-"""Phase B B1 集成测试：FakeLLM 游戏设计工作流（契约 §10 BT-4）。
+"""Phase B B1 integration tests: the FakeLLM game-design workflow (contract §10 BT-4).
 
-流程：export_experiment（写 bundle）→ validate_game（错误 ref）→ 收到结构化
-报告 → validate_game（修正 + previous_errors）→ valid:true → final 文本。
+Flow: export_experiment (writes the bundle) → validate_game (wrong ref) → a structured
+report is received → validate_game (fixed + previous_errors) → valid:true → final text.
 
-Bundle 不可变断言：export 之后快照文件字节，两次 validate_game 调用之后
-逐字节比对（validate_game 对沙箱只读的可执行证据）。
+Bundle immutability assertion: snapshot the file bytes after export, then compare byte
+for byte after both validate_game calls (executable evidence that validate_game is sandbox read-only).
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ def _tool_calls(remote_id: str, name: str, arguments: dict[str, object]) -> LLMR
 
 
 def _expected_ref() -> dict[str, object]:
-    """预计算 export 产物的六项指纹（bundle_sha256 与 generated_at 无关，确定性可期）。"""
+    """Precompute the six fingerprints of the export output (bundle_sha256 is independent of generated_at, so determinism is expected)."""
     bundle = build_bundle(ExperimentSpec.model_validate(GOOD_SPEC))
     spec_part = bundle["spec"]  # type: ignore[index]
     repro = bundle["reproducibility"]  # type: ignore[index]
@@ -124,12 +124,12 @@ def _tool_call_names(result: object) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_game_design_workflow_with_fix_path(sandbox: Path) -> None:
-    """BT-4：export → validate(错 ref) → 报告 → validate(修正) → valid → final；
-    并断言两次 validate_game 前后 bundle 文件逐字节不变。"""
+    """BT-4: export → validate(wrong ref) → report → validate(fixed) → valid → final;
+    also asserts the bundle file is byte-identical before and after both validate_game calls."""
     settings = _settings(sandbox)
     registry = build_game_registry(settings)
 
-    # 阶段 1：export_experiment 写 bundle（末条 final 供工具执行后收尾）
+    # stage 1: export_experiment writes the bundle (the trailing final closes out after tool execution)
     fake_export = FakeLLM([
         _tool_calls("fake-0", "export_experiment", {"config": GOOD_SPEC, "path": BUNDLE_REL}),
         LLMResponse(content="Bundle exported.", finish_reason="stop"),
@@ -139,9 +139,9 @@ async def test_game_design_workflow_with_fix_path(sandbox: Path) -> None:
     assert result1.status == "completed"
     bundle_file = sandbox / BUNDLE_REL
     assert bundle_file.is_file()
-    snapshot = bundle_file.read_bytes()  # 快照：后续 validate_game 不得改变它
+    snapshot = bundle_file.read_bytes()  # snapshot: the later validate_game calls must not change it
 
-    # 阶段 2：错误 ref → 结构化报告 → 修正（previous_errors 携带上轮指纹）→ valid → final
+    # stage 2: wrong ref → structured report → fix (previous_errors carries the previous fingerprints) → valid → final
     fake_design = FakeLLM([
         _tool_calls(
             "fake-1", "validate_game",
@@ -163,7 +163,7 @@ async def test_game_design_workflow_with_fix_path(sandbox: Path) -> None:
     assert result2.result == "Game design validated successfully."
     assert _tool_call_names(result2) == ["validate_game", "validate_game"]
 
-    # 阶段 2 第 1 轮收到的 tool 报告：结构化 REF_MISMATCH（无 ERROR: 前缀）
+    # round 1 of stage 2 receives the tool report: structured REF_MISMATCH (no ERROR: prefix)
     round2_messages = fake_design.received_messages[1]
     tool_reports = [
         str(m.get("content", "")) for m in round2_messages if m.get("role") == "tool"
@@ -173,7 +173,7 @@ async def test_game_design_workflow_with_fix_path(sandbox: Path) -> None:
     assert '"valid":false' in tool_reports[0]
     assert not tool_reports[0].startswith("ERROR")
 
-    # 阶段 2 第 2 轮收到的报告：valid:true（消息历史累积，取最后一条 tool 报告）
+    # round 2 of stage 2 receives the report: valid:true (message history accumulates; take the last tool report)
     round3_messages = fake_design.received_messages[2]
     valid_reports = [
         str(m.get("content", "")) for m in round3_messages if m.get("role") == "tool"
@@ -181,18 +181,18 @@ async def test_game_design_workflow_with_fix_path(sandbox: Path) -> None:
     assert len(valid_reports) == 2
     assert '"valid":true' in valid_reports[-1]
 
-    # Bundle 不可变：两次 validate_game 之后逐字节一致
+    # bundle immutable: byte-identical after both validate_game calls
     assert bundle_file.read_bytes() == snapshot
 
 
 @pytest.mark.asyncio
 async def test_render_game_workflow_produces_playable_html(sandbox: Path) -> None:
-    """BR-11：export → validate_game(通过) → render_game → HTML 真实产生；
-    断言 HTML 以 <!DOCTYPE html> 开头、bundle 前后逐字节不变。"""
+    """BR-11: export → validate_game(pass) → render_game → the HTML really exists;
+    asserts the HTML starts with <!DOCTYPE html> and the bundle is byte-identical before and after."""
     settings = _settings(sandbox)
     registry = build_game_registry(settings)
 
-    # 阶段 1：export_experiment 写 bundle
+    # stage 1: export_experiment writes the bundle
     fake_export = FakeLLM([
         _tool_calls("fake-0", "export_experiment", {"config": GOOD_SPEC, "path": BUNDLE_REL}),
         LLMResponse(content="Bundle exported.", finish_reason="stop"),
@@ -203,7 +203,7 @@ async def test_render_game_workflow_produces_playable_html(sandbox: Path) -> Non
     bundle_file = sandbox / BUNDLE_REL
     snapshot = bundle_file.read_bytes()
 
-    # 阶段 2：validate_game（一次通过）→ render_game → final
+    # stage 2: validate_game (first-pass) → render_game → final
     html_rel = "games/generic-game.html"
     fake_render = FakeLLM([
         _tool_calls(
@@ -224,19 +224,19 @@ async def test_render_game_workflow_produces_playable_html(sandbox: Path) -> Non
     assert result2.result == "Playable game rendered."
     assert _tool_call_names(result2) == ["validate_game", "render_game"]
 
-    # render_game 的 tool 报告：rendered:true + html_sha256
+    # render_game's tool report: rendered:true + html_sha256
     render_messages = fake_render.received_messages[2]
     render_reports = [
         str(m.get("content", "")) for m in render_messages if m.get("role") == "tool"
     ]
     assert '"rendered":true' in render_reports[-1]
 
-    # HTML 真实产生且形态正确
+    # the HTML really exists and has the right shape
     html_file = sandbox / html_rel
     assert html_file.is_file()
     html = html_file.read_text(encoding="utf-8")
     assert html.startswith("<!DOCTYPE html>")
     assert html.count("<script>") == 2
 
-    # Bundle 不可变：render 全流程之后逐字节一致
+    # bundle immutable: byte-identical after the whole render flow
     assert bundle_file.read_bytes() == snapshot

@@ -1,8 +1,8 @@
-"""Phase A 集成测试：真实 AgentLoop + 真实工具（经 build_experiment_registry）+ FakeLLM。
+"""Phase A integration tests: the real AgentLoop + real tools (via build_experiment_registry) + FakeLLM.
 
-对应验收：PA-8（-k design_iteration_success）、PA-9（-k stalled）、PA-10（-k max_steps）。
-无 key 可跑（FakeLLM，不触发真实客户端）；沙箱根指固定测试子目录
-（沙箱对 pytest tmp_path 的会话根目录 mkdir 存在间歇性拦截，沿用 M1 模式）。
+Acceptance mapping: PA-8 (-k design_iteration_success), PA-9 (-k stalled), PA-10 (-k max_steps).
+Runs without keys (FakeLLM; the real client is never triggered); the sandbox root points to a fixed
+test subdirectory (the host sandbox intermittently blocks session-root mkdir on pytest tmp_path; M1 pattern kept).
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ BAD_SPEC: dict[str, object] = {
         {"name": "modality", "levels": [{"name": "visual"}, {"name": "audio"}]},
     ],
     "blocks": [{"name": "main", "trial_count": 96}],
-    # C1 冲突：balance=true 且 ratios 非空
+    # C1 conflict: balance=true together with a non-empty ratios
     "constraints": {
         "balance": True,
         "ratios": [{"factor": "difficulty", "ratios": {"easy": 0.6, "hard": 0.4}}],
@@ -63,7 +63,7 @@ BAD_SPEC: dict[str, object] = {
     "timing": {"fixation_ms": 500, "stimulus_ms": None, "isi_ms": 1000},
 }
 
-# 契约 §9.2 Demo spec（修正后形态：practice 8 + main 96，104 试次）
+# contract §9.2 demo spec (post-fix shape: practice 8 + main 96, 104 trials)
 GOOD_SPEC: dict[str, object] = {
     **BAD_SPEC,
     "blocks": [{"name": "practice", "trial_count": 8}, {"name": "main", "trial_count": 96}],
@@ -93,7 +93,7 @@ def _tool_calls(remote_id: str, name: str, arguments: dict[str, object]) -> LLMR
 
 
 def _tool_call_names(result: object) -> list[str]:
-    """收集 tool_call 事件的 tool_name 序列（事件断言口径）。"""
+    """Collect the tool_name sequence of tool_call events (the assertion basis on events)."""
     return [
         str(event.payload.get("tool_name"))
         for event in getattr(result, "events", [])  # type: ignore[attr-defined]
@@ -111,7 +111,7 @@ def _tool_messages(round_messages: list[dict[str, object]]) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_design_iteration_success(sandbox: Path) -> None:
-    """PA-8：失败→修改→通过→生成→导出全循环。"""
+    """PA-8: the full loop of fail → fix → pass → generate → export."""
     script = [
         _tool_calls("fake-0", "validate_experiment", {"config": BAD_SPEC, "previous_errors": []}),
         _tool_calls("fake-1", "validate_experiment", {"config": GOOD_SPEC, "previous_errors": []}),
@@ -121,7 +121,7 @@ async def test_design_iteration_success(sandbox: Path) -> None:
             "export_experiment",
             {"config": GOOD_SPEC, "path": "experiments/generic-demo-v0.1.0-seed42.json"},
         ),
-        LLMResponse(content="实验设计完成并已导出", finish_reason="stop"),
+        LLMResponse(content="Experiment design completed and exported", finish_reason="stop"),
     ]
     fake = FakeLLM(script)
     settings = _settings(sandbox)
@@ -131,26 +131,26 @@ async def test_design_iteration_success(sandbox: Path) -> None:
         settings=settings,
         task_id="task-expa001",
     )
-    result = await loop.run_task("设计一个通用两因素实验并导出")
+    result = await loop.run_task("design a generic two-factor experiment and export it")
 
     assert result.status == "completed"
-    assert result.result == "实验设计完成并已导出"
+    assert result.result == "Experiment design completed and exported"
 
-    # 事件断言：validate ≥1、generate ≥1、export ==1
+    # event assertions: validate ≥1, generate ≥1, export ==1
     tool_calls = _tool_call_names(result)
     assert tool_calls.count("validate_experiment") >= 1
     assert tool_calls.count("generate_trials") >= 1
     assert tool_calls.count("export_experiment") == 1
 
-    # 迭代证据：第二轮 messages 含第一轮验证 JSON（含 CONSTRAINT_CONFLICT）
+    # iteration evidence: round-2 messages contain the round-1 validation JSON (incl. CONSTRAINT_CONFLICT)
     second_round_tool_messages = _tool_messages(fake.received_messages[1])
     assert second_round_tool_messages
     assert "CONSTRAINT_CONFLICT" in second_round_tool_messages[0]
     assert '"valid":false' in second_round_tool_messages[0]
 
-    # generate_trials 输出的 trials_fingerprint == Bundle 内值（同纯函数一致性）
+    # generate_trials' trials_fingerprint == the value inside the Bundle (same-pure-function consistency)
     generate_tool_messages = _tool_messages(fake.received_messages[3])
-    generate_payload = json.loads(generate_tool_messages[-1])  # 最后一即 generate 的输出
+    generate_payload = json.loads(generate_tool_messages[-1])  # the last one is generate's output
     bundle_path = sandbox / "experiments" / "generic-demo-v0.1.0-seed42.json"
     assert bundle_path.exists()
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
@@ -158,7 +158,7 @@ async def test_design_iteration_success(sandbox: Path) -> None:
     assert bundle["summary"]["trial_count"] == 104
     assert bundle["summary"]["frequency"]["difficulty"] == {"easy": 52, "hard": 52}
 
-    # 独立验证 CLI 通过（exit 0）
+    # the independent verification CLI passes (exit 0)
     proc = subprocess.run(
         [sys.executable, "-m", "src.experiment.verify", str(bundle_path)],
         capture_output=True,
@@ -170,7 +170,7 @@ async def test_design_iteration_success(sandbox: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_design_iteration_stalled(sandbox: Path) -> None:
-    """PA-9：三次提交同一错误 spec，previous_errors 逐轮累积 → 第 3 次 ITERATION_STALLED → final。"""
+    """PA-9: the same bad spec submitted three times, previous_errors accumulating per round → the 3rd is ITERATION_STALLED → final."""
     script = [
         _tool_calls("fake-0", "validate_experiment", {"config": BAD_SPEC, "previous_errors": []}),
         _tool_calls("fake-1", "validate_experiment", {"config": BAD_SPEC, "previous_errors": [STALLED_FINGERPRINT]}),
@@ -179,7 +179,7 @@ async def test_design_iteration_stalled(sandbox: Path) -> None:
             "validate_experiment",
             {"config": BAD_SPEC, "previous_errors": [STALLED_FINGERPRINT, STALLED_FINGERPRINT]},
         ),
-        LLMResponse(content="无法解决冲突，请用户裁决", finish_reason="stop"),
+        LLMResponse(content="Cannot resolve the conflict; asking the user to decide", finish_reason="stop"),
     ]
     fake = FakeLLM(script)
     settings = _settings(sandbox)
@@ -189,25 +189,25 @@ async def test_design_iteration_stalled(sandbox: Path) -> None:
         settings=settings,
         task_id="task-expa002",
     )
-    result = await loop.run_task("设计实验（会停滞）")
+    result = await loop.run_task("design an experiment (will stall)")
 
-    # 终止且未导出
+# terminated without exporting
     assert result.status == "completed"
     tool_calls = _tool_call_names(result)
     assert tool_calls.count("export_experiment") == 0
     assert tool_calls.count("generate_trials") == 0
     assert not list(sandbox.rglob("*.json"))
 
-    # 第 3 轮收到 ITERATION_STALLED（stalled: true）——该轮最后一条 tool 消息即第 3 次验证输出
+    # round 3 receives ITERATION_STALLED (stalled: true) — the last tool message of that round is the 3rd validation output
     third_round_tool_messages = _tool_messages(fake.received_messages[3])
     assert third_round_tool_messages
     payload = json.loads(third_round_tool_messages[-1])
     assert payload["stalled"] is True
     assert any(e["error_code"] == "ITERATION_STALLED" for e in payload["errors"])
     stalled_issue = next(e for e in payload["errors"] if e["error_code"] == "ITERATION_STALLED")
-    assert stalled_issue["suggestion"] == "停止重复提交，总结未解决冲突并请用户裁决"
+    assert stalled_issue["suggestion"] == "stop resubmitting; summarize the unresolved conflict and ask the user to decide"
 
-    # 逐轮推演（MA-1）：第 1、2 次不 stalled，第 3 次才 stalled
+    # round-by-round derivation (MA-1): rounds 1 and 2 not stalled, round 3 stalls
     first_payload = json.loads(_tool_messages(fake.received_messages[1])[0])
     second_payload = json.loads(_tool_messages(fake.received_messages[2])[0])
     assert first_payload["stalled"] is False
@@ -216,7 +216,7 @@ async def test_design_iteration_stalled(sandbox: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_design_iteration_max_steps(sandbox: Path) -> None:
-    """PA-10：恒返回 validate(同一坏 spec) → failed + final 必发（M1 机制防挂死兜底）。"""
+    """PA-10: always returning validate(the same bad spec) → failed + final always emitted (the M1 max-steps backstop against hangs)."""
     max_steps = 5
     script = [
         _tool_calls(
@@ -226,7 +226,7 @@ async def test_design_iteration_max_steps(sandbox: Path) -> None:
         )
         for i in range(max_steps)
     ]
-    fake = FakeLLM(script)  # 第 max_steps+1 次调用会 AssertionError——loop 不得越界
+    fake = FakeLLM(script)  # the max_steps+1-th call raises AssertionError — the loop must not overstep
     settings = _settings(sandbox, max_steps=max_steps)
     loop = AgentLoop(
         client=fake,
@@ -234,12 +234,12 @@ async def test_design_iteration_max_steps(sandbox: Path) -> None:
         settings=settings,
         task_id="task-expa003",
     )
-    result = await loop.run_task("设计实验（永不收敛）")
+    result = await loop.run_task("design an experiment (never converges)")
 
     assert result.status == "failed"
     assert "max steps" in result.result
     assert fake.calls == max_steps
     assert [e.type for e in result.events[-2:]] == [AgentEventType.error, AgentEventType.final]
     assert result.events[-1].payload["status"] == "failed"
-    # 兜底期间无导出
+# no export during the backstop
     assert not list(sandbox.rglob("*.json"))

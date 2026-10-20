@@ -13,7 +13,7 @@
 | `docs/checklists/browser-playtest-checklist.md` | 新增 | 浏览器人工试玩检查清单（9 节 30 项） |
 | `pyproject.toml` | 修订 | 补 build-system + setuptools 包发现，`pip install -e .` 可用（已验证仓库外可 import） |
 | `scripts/check.sh` | 修订 | 移除硬编码个人 node 路径，改为 PATH 缺失提示 |
-| `docs/ENVIRONMENT_AUDIT.md` 等 4 个历史文档 | 脱敏 | `/Users/<user>` 绝对路径 → `~` |
+| `docs/ENVIRONMENT_AUDIT.md` 等 4 个历史文档 | 脱敏 | home-directory 绝对路径 → `~` |
 | `.workbuddy/skills/`（4 文件） | 取消跟踪 | 会话内部数据不入公开仓库（磁盘文件保留） |
 
 M1 / Phase A / B0-B2 冻结代码零改动（git diff 验证：src/ 与既有 tests/ 无修改）。

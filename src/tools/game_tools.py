@@ -1,15 +1,15 @@
-"""游戏工具：validate_game（B1，契约 §10）+ render_game（B2，契约 §11.8）。
+"""Game tools: validate_game (B1, contract §10) + render_game (B2, contract §11.8).
 
-风格对齐 experiment_tools.py：Input 模型 + 内部 _GameBlocked 异常 +
-BLOCKED: 前缀 + build_*(settings) -> ToolSpec 工厂。
+Style aligned with experiment_tools.py: Input model + internal _GameBlocked exception +
+BLOCKED: prefix + build_*(settings) -> ToolSpec factories.
 
-两级错误契约（沿用 Phase A §5.4 语义）：
-- 工具级失败（非 dict、体积护栏、沙箱拒绝、bundle 不可加载、HTML 超护栏）→ ok=False；
-- 领域级失败（GameSpec 规则 G1~G6）→ 永远 ok=True + valid:false + rendered:false
-  （B0 validate_game 的结果原样回传——规则不重复实现；不渲染、不写文件）。
+Two-tier error contract (inheriting the Phase A §5.4 semantics):
+- tool-level failure (non-dict, size guard, sandbox refusal, unloadable bundle, oversized HTML) → ok=False;
+- domain-level failure (GameSpec rules G1~G6) → always ok=True + valid:false + rendered:false
+  (B0 validate_game's result passed through verbatim — no rule duplication; nothing rendered, nothing written).
 
-边界（§10/§11）：游戏工具对 ExperimentBundle 只读；render_game 唯一写动作是
-把渲染产物 HTML 写入 data/ 沙箱（沙箱五步规则 1~3+5，第 4 步为 HTML 体积护栏）。
+Boundary (§10/§11): the game tools treat the ExperimentBundle as read-only; render_game's only write
+is placing the rendered HTML inside the data/ sandbox (five-step rule steps 1~3+5; step 4 is the HTML size guard).
 """
 
 from __future__ import annotations
@@ -34,19 +34,19 @@ from src.tools._sandbox_io import SandboxBlocked, validate_sandbox_path, write_s
 
 
 class _GameBlocked(Exception):
-    """工具级安全/护栏拒绝（→ BLOCKED: 前缀）。"""
+    """Tool-level security/guard refusal (→ BLOCKED: prefix)."""
 
 
 class ValidateGameInput(BaseModel):
-    """validate_game 参数（契约 §10）。"""
+    """validate_game arguments (contract §10)."""
 
-    game_config: dict[str, object]  # GameSpec 的 JSON 对象（LLM 直接内联生成）
-    bundle_path: str = Field(min_length=1)  # 相对 data/ 沙箱根的 ExperimentBundle JSON 路径
-    previous_errors: list[str] = Field(default_factory=list)  # 此前轮次 error_code:path 指纹
+    game_config: dict[str, object]  # the GameSpec JSON object (generated inline by the LLM)
+    bundle_path: str = Field(min_length=1)  # ExperimentBundle JSON path relative to the data/ sandbox root
+    previous_errors: list[str] = Field(default_factory=list)  # error_code:path fingerprints of previous rounds
 
 
 def _game_config_size_guard(game_config: dict[str, object]) -> None:
-    """体积护栏：game_config 序列化字节 > 256KB → 拒绝（复用 B0 上限）。"""
+    """Size guard: game_config serialized bytes > 256KB → refuse (reuses the B0 limit)."""
     try:
         size = len(canonical_json(game_config).encode("utf-8"))
     except (TypeError, ValueError) as exc:
@@ -56,7 +56,7 @@ def _game_config_size_guard(game_config: dict[str, object]) -> None:
 
 
 def _load_bundle(bundle_path: str, sandbox: Path) -> dict[str, object]:
-    """从 data/ 沙箱只读加载 ExperimentBundle（沙箱五步规则第 1~3 步复用）。"""
+    """Load the ExperimentBundle read-only from the data/ sandbox (five-step rule steps 1~3 reused)."""
     try:
         target = validate_sandbox_path(bundle_path, sandbox)
     except SandboxBlocked as exc:
@@ -79,8 +79,8 @@ def _issue_payload(issue: GameValidationIssue) -> dict[str, object]:
 def _stalled_issues(
     errors: list[GameValidationIssue], previous_errors: list[str]
 ) -> tuple[bool, list[GameValidationIssue]]:
-    """stalled 判定（§10 第 3 步，与 Phase A §5.4 同协议）：
-    任一当次 error_code:path 指纹在 previous_errors 出现 ≥2 次。"""
+    """Stalled decision (§10 step 3, same protocol as Phase A §5.4):
+    any current error_code:path fingerprint appearing ≥2 times in previous_errors."""
     current = [f"{e.error_code}:{e.path}" for e in errors]
     stalled = any(previous_errors.count(fp) >= 2 for fp in current)
     if not stalled:
@@ -94,7 +94,7 @@ def _stalled_issues(
                     error_code="ITERATION_STALLED",
                     path="<root>",
                     message=f"error fingerprint {fp} submitted {count + 1} times without progress",
-                    suggestion="停止重复提交，总结未解决冲突并请用户裁决",
+                    suggestion="stop resubmitting; summarize the unresolved conflict and ask the user to decide",
                 )
             )
     return True, result
@@ -124,7 +124,7 @@ async def _execute_validate_game(args: ValidateGameInput, sandbox: Path) -> Tool
 
 
 def build_validate_game_spec(settings: Settings) -> ToolSpec:
-    """构造 validate_game 的 ToolSpec（幂等、只读沙箱、low）。"""
+    """Build validate_game's ToolSpec (idempotent, sandbox read-only, low)."""
     sandbox = Path(settings.data_sandbox_dir)
 
     async def executor(base: Any) -> ToolResult:
@@ -152,27 +152,27 @@ def build_validate_game_spec(settings: Settings) -> ToolSpec:
 
 
 class RenderGameInput(BaseModel):
-    """render_game 参数（契约 §11.8）。"""
+    """render_game arguments (contract §11.8)."""
 
-    game_config: dict[str, object]  # GameSpec 的 JSON 对象（须通过 validate_game）
-    bundle_path: str = Field(min_length=1)  # 相对 data/ 沙箱根的 ExperimentBundle 路径
-    output_path: str = Field(min_length=1)  # 渲染产物 HTML 的沙箱内路径（如 games/x.html）
-    previous_errors: list[str] = Field(default_factory=list)  # 此前轮次 error_code:path 指纹
+    game_config: dict[str, object]  # the GameSpec JSON object (must pass validate_game)
+    bundle_path: str = Field(min_length=1)  # ExperimentBundle path relative to the data/ sandbox root
+    output_path: str = Field(min_length=1)  # sandbox path of the rendered HTML (e.g. games/x.html)
+    previous_errors: list[str] = Field(default_factory=list)  # error_code:path fingerprints of previous rounds
 
 
 async def _execute_render_game(args: RenderGameInput, sandbox: Path) -> ToolResult:
-    """render_game 执行流程（契约 §11.8 步骤①~⑥）。"""
-    # ① game_config 体积护栏
+    """render_game execution flow (contract §11.8 steps ①~⑥)."""
+    # ① game_config size guard
     try:
         _game_config_size_guard(args.game_config)
     except _GameBlocked as exc:
         return ToolResult(ok=False, error=f"BLOCKED: {exc}")
-    # ② bundle 只读加载
+    # ② read-only bundle load
     try:
         bundle = _load_bundle(args.bundle_path, sandbox)
     except _GameBlocked as exc:
         return ToolResult(ok=False, error=f"BLOCKED: {exc}")
-    # ③ 前置校验（B0 validate_game，规则零重复）：不通过 → 不渲染、不写文件
+    # ③ precondition check (B0 validate_game, zero rule duplication): failure → nothing rendered, nothing written
     result = validate_game(args.game_config, bundle)
     stalled, errors = _stalled_issues(result.errors, args.previous_errors)
     if not result.valid or result.game_spec is None:
@@ -186,20 +186,20 @@ async def _execute_render_game(args: RenderGameInput, sandbox: Path) -> ToolResu
         }
         return ToolResult(ok=True, result=canonical_json(payload))
 
-    # ④ 渲染 + HTML 体积护栏（沙箱五步规则第 4 步）
+    # ④ render + HTML size guard (five-step rule step 4)
     html = render_game_html(bundle, result.game_spec)
     data = html.encode("utf-8")
     if len(data) > MAX_RENDERED_HTML_BYTES:
         return ToolResult(ok=False, error="BLOCKED: rendered html too large")
 
-    # ⑤ 沙箱写盘（五步规则 1~3 + 5）
+    # ⑤ sandbox write (five-step rule steps 1~3 + 5)
     try:
         target = validate_sandbox_path(args.output_path, sandbox)
         write_sandbox_file(target, data)
     except SandboxBlocked as exc:
         return ToolResult(ok=False, error=f"BLOCKED: {exc}")
 
-    # ⑥ 成功 payload
+    # ⑥ success payload
     trials = bundle.get("trials")
     payload = {
         "rendered": True,
@@ -212,7 +212,7 @@ async def _execute_render_game(args: RenderGameInput, sandbox: Path) -> ToolResu
 
 
 def build_render_game_spec(settings: Settings) -> ToolSpec:
-    """构造 render_game 的 ToolSpec（写盘 → non-idempotent/medium，对齐 export_experiment）。"""
+    """Build render_game's ToolSpec (writes to disk → non-idempotent/medium, aligned with export_experiment)."""
     sandbox = Path(settings.data_sandbox_dir)
 
     async def executor(base: Any) -> ToolResult:

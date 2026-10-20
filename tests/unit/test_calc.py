@@ -1,4 +1,4 @@
-"""M1-5 calc 单元测试（契约 §3.2；-k tool_security 命中）。"""
+"""M1-5 calc unit tests (contract §3.2; matched by -k tool_security)."""
 
 from __future__ import annotations
 
@@ -69,19 +69,19 @@ async def test_calc_rejects_attribute_and_lambda() -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_calc_rejects_depth_and_length() -> None:
-    # 长度 > 200：参数校验层拒绝（经 registry 统一入口）
+    # length > 200: rejected at the parameter-validation layer (via the registry unified entry)
     registry = ToolRegistry()
     registry.register(calc.build_tool_spec(Settings()))
-    too_long = await registry.execute("calc", {"expression": "1+" * 110 + "1"})  # 221 字符
+    too_long = await registry.execute("calc", {"expression": "1+" * 110 + "1"})  # 221 characters
     assert not too_long.ok
     assert "invalid arguments" in too_long.error
 
-    # 括号嵌套深度 > 20
+    # parenthesis nesting depth > 20
     paren = await _run("(" * 25 + "1" + ")" * 25)
     assert not paren.ok and "BLOCKED" in paren.error
 
-    # 结构性 AST 深度 > 20（左结合运算链）
-    deep = await _run("1+" * 21 + "1")  # 深度 22
+    # structural AST depth > 20 (left-associative operator chain)
+    deep = await _run("1+" * 21 + "1")  # depth 22
     assert not deep.ok and "BLOCKED" in deep.error
 
 

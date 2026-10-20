@@ -1,6 +1,6 @@
-"""PA-7 工具层单元测试（契约 §7；-k "tool_" 命中——文件名 test_tool_specs 含 "tool_"）。
+"""PA-7 tool-layer unit tests (contract §7; matched by -k "tool_" — the filename test_tool_specs contains "tool_").
 
-两级错误契约：领域级 valid:false → ok=True（不带 ERROR:）；工具级 → ok=False。
+Two-tier error contract: domain-level valid:false → ok=True (no ERROR:); tool-level → ok=False.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from src.agent.registry import ToolRegistry
 from src.config import Settings
 from src.tools import experiment_tools
 
-# 环境说明：沙箱对 pytest tmp_path 的会话根目录 mkdir 存在间歇性拦截 → 沿用 M1
-# 固定测试子目录模式（自建自清，清不掉也无妨——data/ 已被 gitignore）。
+# Environment note: the host sandbox intermittently blocks session-root mkdir on pytest tmp_path → the M1
+# fixed-test-subdirectory pattern is kept (self-created, self-cleaned; leftovers are fine — data/ is gitignored).
 TEST_SANDBOX = Path("data/.test-sandbox/experiment-tools")
 
 
@@ -74,7 +74,7 @@ def _settings(sandbox: Path) -> Settings:
 
 
 def test_tool_specs_registered_flags() -> None:
-    """三工具 idempotency/risk_level 声明：idempotent/low ×2、non-idempotent/medium ×1。"""
+    """The three tools' idempotency/risk_level declarations: idempotent/low ×2, non-idempotent/medium ×1."""
     settings = Settings()
     validate = experiment_tools.build_validate_spec(settings)
     generate = experiment_tools.build_generate_spec(settings)
@@ -90,12 +90,12 @@ def test_tool_specs_registered_flags() -> None:
     assert export.idempotency == "non-idempotent"
     assert export.risk_level == "medium"
 
-    # effective_idempotency 默认返回声明值（三工具均不覆写）
+    # effective_idempotency returns the declared value by default (none of the three tools overrides it)
     assert validate.effective_idempotency({}) == "idempotent"
     assert generate.effective_idempotency({}) == "idempotent"
     assert export.effective_idempotency({}) == "non-idempotent"
 
-    # 注册器既有校验对三工具生效
+    # the registry's existing validation applies to all three tools
     registry = ToolRegistry()
     for spec in (validate, generate, export):
         registry.register(spec)
@@ -106,10 +106,10 @@ def test_tool_specs_registered_flags() -> None:
 
 @pytest.mark.asyncio
 async def test_validate_domain_vs_tool_error(sandbox: Path) -> None:
-    """坏 spec → ok=True + valid:false 不带 ERROR:；非 dict config → registry 路径 ok=False。"""
+    """Bad spec → ok=True + valid:false without ERROR:; non-dict config → ok=False via the registry path."""
     spec = experiment_tools.build_validate_spec(_settings(sandbox))
 
-    # 领域级失败：ok=True、valid:false、无 ERROR: 前缀
+    # domain-level failure: ok=True, valid:false, no ERROR: prefix
     result = await spec.executor(experiment_tools.ValidateExperimentInput(config=BAD_SPEC))
     assert result.ok
     assert not result.result.startswith("ERROR:")
@@ -117,7 +117,7 @@ async def test_validate_domain_vs_tool_error(sandbox: Path) -> None:
     assert payload["valid"] is False
     assert any(e["error_code"] == "CONSTRAINT_CONFLICT" for e in payload["errors"])
 
-    # 工具级失败：config 非 dict → registry 统一入口 ok=False（invalid arguments）
+    # tool-level failure: config is not a dict → ok=False at the registry unified entry (invalid arguments)
     registry = ToolRegistry()
     registry.register(spec)
     tool_result = await registry.execute("validate_experiment", {"config": "not-a-dict"})
@@ -127,7 +127,7 @@ async def test_validate_domain_vs_tool_error(sandbox: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_config_size_blocked(sandbox: Path) -> None:
-    """config 序列化字节 > 256KB → BLOCKED: config too large（三工具同守）。"""
+    """config serialized bytes > 256KB → BLOCKED: config too large (shared by all three tools)."""
     huge: dict[str, object] = {**SPEC_DICT, "name": "x" * (300 * 1024)}
     settings = _settings(sandbox)
     validate = experiment_tools.build_validate_spec(settings)
@@ -151,7 +151,7 @@ async def test_config_size_blocked(sandbox: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_generate_no_file_written(sandbox: Path) -> None:
-    """generate 是纯函数不落盘：执行后沙箱无新文件。"""
+    """generate is a pure function with no disk writes: no new files in the sandbox after execution."""
     before = {p.name for p in sandbox.iterdir()}
     spec = experiment_tools.build_generate_spec(_settings(sandbox))
     result = await spec.executor(experiment_tools.GenerateTrialsInput(config=SPEC_DICT))
@@ -164,12 +164,12 @@ async def test_generate_no_file_written(sandbox: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_errors_truncated_at_20(sandbox: Path) -> None:
-    """errors 上限 20 条：超出截断并置 errors_truncated: true。"""
+    """errors cap of 20: excess is truncated and errors_truncated: true is set."""
     broken: dict[str, object] = {
         "schema_version": 1,
         "name": "broken",
         "seed": 1,
-        # 25 个空名因素 → 25 条 Pydantic Field 错误
+        # 25 empty-named factors → 25 Pydantic Field errors
         "factors": [{"name": "", "levels": [{"name": "a"}]} for _ in range(25)],
         "blocks": [{"name": "main", "trial_count": 4}],
         "responses": [{"name": "r", "kind": "text"}],
@@ -185,7 +185,7 @@ async def test_errors_truncated_at_20(sandbox: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_generate_invalid_spec_no_generation(sandbox: Path) -> None:
-    """generate 对无效 spec 返回 validate 同构输出（valid:false + errors），不生成。"""
+    """generate returns a validate-isomorphic output for an invalid spec (valid:false + errors) and does not generate."""
     spec = experiment_tools.build_generate_spec(_settings(sandbox))
     result = await spec.executor(experiment_tools.GenerateTrialsInput(config=BAD_SPEC))
     assert result.ok

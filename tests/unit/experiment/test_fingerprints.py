@@ -1,8 +1,8 @@
-"""PA-5 SHA-256 与 verify 测试（契约 §7；-k "sha256 or fingerprint or verify" 命中）。
+"""PA-5 SHA-256 and verify tests (contract §7; matched by -k "sha256 or fingerprint or verify").
 
-期望值由独立 `python -c "import hashlib; ..."` 计算后写死（不依赖被测代码自证）。
-环境说明：沙箱对 pytest tmp_path 的会话根目录 mkdir 存在间歇性拦截 → 沿用 M1
-固定测试子目录模式（data/ 已被 gitignore）。
+Expected values were computed independently via `python -c "import hashlib; ..."` and hardcoded (no self-certification by the code under test).
+Environment note: the host sandbox intermittently blocks session-root mkdir on pytest tmp_path → the M1
+fixed-test-subdirectory pattern is kept (data/ is gitignored).
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ _HEX64 = "^[0-9a-f]{64}$"
 
 
 def test_sha256_known_vectors() -> None:
-    # 期望值独立计算：
+# expected value computed independently:
     #   python -c "import hashlib; print(hashlib.sha256(b'').hexdigest())"
     #   python -c "import hashlib; print(hashlib.sha256(b'abc').hexdigest())"
     #   python -c "import hashlib,json; print(hashlib.sha256(json.dumps({'b':1,'a':'中文'},sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest())"
@@ -83,7 +83,7 @@ def test_sha256_known_vectors() -> None:
 
 
 def test_fingerprint_full_length() -> None:
-    """三指纹（config/trials/bundle）均完整 64 小写 hex——无 [:8] 截断（CR-2）。"""
+    """All three fingerprints (config/trials/bundle) are full 64-lowercase-hex — no [:8] truncation (CR-2)."""
     import re
 
     spec = ExperimentSpec.model_validate(SPEC_DICT)
@@ -102,7 +102,7 @@ def test_fingerprint_full_length() -> None:
 
 
 def test_bundle_sha256_excludes_timestamp() -> None:
-    """改 generated_at 不变 bundle_sha256（时间戳不参与任何指纹）。"""
+    """Changing generated_at does not change bundle_sha256 (the timestamp participates in no fingerprint)."""
     spec = ExperimentSpec.model_validate(SPEC_DICT)
     first = build_bundle(spec, generated_at="2026-01-01T00:00:00Z")
     second = build_bundle(spec, generated_at="2030-06-15T12:30:45Z")
@@ -123,7 +123,7 @@ def test_verify_bundle_ok(bundle_file: Path) -> None:
     assert report.ok
     assert report.bundle_sha256_match
     assert report.trials_fingerprint_match
-    # CLI 路径：python -m src.experiment.verify <path> → exit 0
+# CLI path: python -m src.experiment.verify <path> → exit 0
     proc = subprocess.run(
         [sys.executable, "-m", "src.experiment.verify", str(bundle_file)],
         capture_output=True,
@@ -135,11 +135,11 @@ def test_verify_bundle_ok(bundle_file: Path) -> None:
 
 
 def test_verify_bundle_detects_tamper(bundle_file: Path, scratch: Path) -> None:
-    """篡改 trials 任一字节 → 两项 check 失败、CLI exit 1。"""
+    """Tampering with any byte of trials → both checks fail, CLI exit 1."""
     data = json.loads(bundle_file.read_text(encoding="utf-8"))
     assert data["trials"][0]["block"] == "practice"
     original_level = data["trials"][0]["factors"]["difficulty"]
-    data["trials"][0]["factors"]["difficulty"] = "hard" if original_level == "easy" else "easy"  # 篡改一个试次的因素水平
+    data["trials"][0]["factors"]["difficulty"] = "hard" if original_level == "easy" else "easy"  # tamper one trial's factor level
     tampered = scratch / "tampered.json"
     tampered.write_text(canonical_json(data), encoding="utf-8")
 
@@ -156,4 +156,4 @@ def test_verify_bundle_detects_tamper(bundle_file: Path, scratch: Path) -> None:
     )
     assert proc.returncode == 1
     assert "FAIL" in proc.stdout
-    assert proc.stderr  # 失败详情进 stderr
+    assert proc.stderr  # failure details go to stderr

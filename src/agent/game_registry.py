@@ -1,6 +1,6 @@
-"""游戏组合注册（Phase B 契约 §10/§11）：实验三工具 + validate_game + render_game。
+"""Game combinator registration (Phase B contract §10/§11): the experiment three tools + validate_game + render_game.
 
-复制 build_experiment_registry 组合模式；build_registry（M1 组装）零改动。
+Copies the build_experiment_registry combinator pattern; build_registry (M1 assembly) stays untouched.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from src.tools import experiment_tools, game_tools
 
 
 def build_game_registry(settings: Settings) -> ToolRegistry:
-    """M1 三工具 + 实验三工具 + validate_game + render_game（组合注册：build_registry 零改动）。"""
+    """M1 three tools + experiment three tools + validate_game + render_game (combinator registration: build_registry untouched)."""
     registry = build_registry(settings)
     registry.register(experiment_tools.build_validate_spec(settings))
     registry.register(experiment_tools.build_generate_spec(settings))

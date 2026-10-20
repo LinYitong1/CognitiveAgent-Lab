@@ -1,15 +1,15 @@
-"""Phase B B3 集成测试：端到端 FakeLLM Agent 工作流（E2E demo 验收）。
+"""Phase B B3 integration tests: the end-to-end FakeLLM agent workflow (E2E demo acceptance).
 
-覆盖：
-- BD-1 单一 AgentLoop 内完整五工具链（validate_experiment → generate_trials →
+Coverage:
+- BD-1 the full five-tool chain inside a single AgentLoop (validate_experiment → generate_trials →
   export_experiment → validate_game → render_game）+ final；
-- BD-2 examples/run_game_agent.py 子进程真实可运行（无 .env、无密钥）；
-- BD-3 二次运行可复现：bundle 指纹一致、HTML 逐字节一致；
-- BD-4 任何验证失败不被静默忽略：篡改/缺失产物必被 verify_artifacts 抓出；
-- BD-5 "抄近路 LLM"（跳过 render 谎称完成）必被双层验证抓出。
+- BD-2 examples/run_game_agent.py actually runs as a subprocess (no .env, no keys);
+- BD-3 a second run reproduces: identical bundle fingerprints, byte-identical HTML;
+- BD-4 no verification failure is silently ignored: tampered/missing artifacts must be caught by verify_artifacts;
+- BD-5 a "shortcut LLM" (skipping render while claiming success) must be caught by the two-layer verification.
 
-示例模块经 importlib 加载（examples/ 非包），复用其 DEMO_SPEC / build_script /
-verify_agent_run / verify_artifacts——测试与 Demo 共用同一验证逻辑，防漂移。
+The example module is loaded via importlib (examples/ is not a package) and its DEMO_SPEC / build_script /
+verify_agent_run / verify_artifacts are reused — tests and demo share the same verification logic, preventing drift.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ _demo_module = None
 
 
 def demo_module():  # type: ignore[no-untyped-def]
-    """加载（并缓存）示例模块 run_game_agent。"""
+    """Load (and cache) the example module run_game_agent."""
     global _demo_module
     if _demo_module is None:
         spec = importlib.util.spec_from_file_location("run_game_agent", EXAMPLE_PATH)
@@ -77,7 +77,7 @@ def _final_response(text: str) -> LLMResponse:
 
 @pytest.mark.asyncio
 async def test_bd1_full_workflow_single_agent_loop(sandbox: Path) -> None:
-    """BD-1：单一 AgentLoop 跑通五工具链；双层验证零问题。"""
+    """BD-1: the five-tool chain runs inside a single AgentLoop; both verification layers report zero problems."""
     demo = demo_module()
     settings = _settings(sandbox)
     registry = build_game_registry(settings)
@@ -87,7 +87,7 @@ async def test_bd1_full_workflow_single_agent_loop(sandbox: Path) -> None:
     result = await loop.run_task(demo.GOAL)
 
     assert result.status == "completed"
-    # FakeLLM 与示例 ScriptedLLM 鸭子类型兼容：received_messages 同构
+    # FakeLLM is duck-type compatible with the example's ScriptedLLM: received_messages is isomorphic
     assert demo.verify_agent_run(result, llm) == []  # type: ignore[arg-type]
     assert demo.verify_artifacts(
         sandbox, demo.DEMO_SPEC, demo._game_config(), demo.BUNDLE_REL, demo.HTML_REL
@@ -98,7 +98,7 @@ async def test_bd1_full_workflow_single_agent_loop(sandbox: Path) -> None:
 
 def _run_example(sandbox_dir: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
-    env["CALC_AGENT_ENV_FILE"] = "/dev/null"  # 证明无密钥/无 .env 可运行
+    env["CALC_AGENT_ENV_FILE"] = "/dev/null"  # proves it runs without keys or .env
     env["DATA_SANDBOX_DIR"] = sandbox_dir
     return subprocess.run(
         [sys.executable, str(EXAMPLE_PATH)],
@@ -111,7 +111,7 @@ def _run_example(sandbox_dir: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_bd2_example_script_runs_clean() -> None:
-    """BD-2：示例脚本子进程运行退出码 0，产物真实存在。"""
+    """BD-2: the example script exits 0 as a subprocess; the artifacts really exist."""
     demo = demo_module()
     _try_cleanup(EXAMPLE_SANDBOX)
     run_dir = EXAMPLE_SANDBOX / "run1"
@@ -125,7 +125,7 @@ def test_bd2_example_script_runs_clean() -> None:
 
 
 def test_bd3_example_output_reproducible() -> None:
-    """BD-3：两次独立运行 → bundle_sha256 / trials_fingerprint 一致、HTML 逐字节一致。"""
+    """BD-3: two independent runs → identical bundle_sha256 / trials_fingerprint, byte-identical HTML."""
     demo = demo_module()
     _try_cleanup(EXAMPLE_SANDBOX)
     proc1 = _run_example(str(EXAMPLE_SANDBOX / "run1"))
@@ -152,7 +152,7 @@ def test_bd3_example_output_reproducible() -> None:
 
 
 def test_bd4_verification_catches_tampering() -> None:
-    """BD-4：篡改/缺失产物 → verify_artifacts 报告问题（不静默忽略）。"""
+    """BD-4: tampered/missing artifacts → verify_artifacts reports problems (never silently ignored)."""
     demo = demo_module()
     _try_cleanup(EXAMPLE_SANDBOX)
     sandbox = EXAMPLE_SANDBOX / "sandbox"
@@ -161,10 +161,10 @@ def test_bd4_verification_catches_tampering() -> None:
     spec = demo.DEMO_SPEC
     game = demo._game_config()
 
-    # 基线：完好产物零问题
+# baseline: intact artifacts report zero problems
     assert demo.verify_artifacts(sandbox, spec, game, demo.BUNDLE_REL, demo.HTML_REL) == []
 
-    # ① HTML 缺失
+# (1) HTML missing
     html_file = sandbox / demo.HTML_REL
     html_backup = html_file.read_bytes()
     html_file.unlink()
@@ -172,7 +172,7 @@ def test_bd4_verification_catches_tampering() -> None:
     assert any("html file missing" in p for p in problems)
     html_file.write_bytes(html_backup)
 
-    # ② Bundle 试次被篡改（verify_bundle 双指纹重算必失配）
+# (2) a bundle trial tampered (verify_bundle dual-fingerprint recomputation must mismatch)
     bundle_file = sandbox / demo.BUNDLE_REL
     bundle_backup = bundle_file.read_text(encoding="utf-8")
     bundle = json.loads(bundle_backup)
@@ -182,36 +182,36 @@ def test_bd4_verification_catches_tampering() -> None:
     assert problems, "tampered bundle must be reported"
     bundle_file.write_text(bundle_backup, encoding="utf-8")
 
-    # ③ HTML 被篡改（与确定性渲染逐字节比对必失配）
+# (3) HTML tampered (byte comparison against the deterministic render must mismatch)
     html_file.write_bytes(html_backup[:-8] + b"tampered")
     problems = demo.verify_artifacts(sandbox, spec, game, demo.BUNDLE_REL, demo.HTML_REL)
     assert any("byte-identical" in p for p in problems)
     html_file.write_bytes(html_backup)
 
-    # 恢复后再次零问题（证明上述失败确由篡改引起）
+# after restoring, zero problems again (proving the failures above were caused by the tampering)
     assert demo.verify_artifacts(sandbox, spec, game, demo.BUNDLE_REL, demo.HTML_REL) == []
     _try_cleanup(EXAMPLE_SANDBOX)
 
 
 @pytest.mark.asyncio
 async def test_bd5_shortcut_llm_exposed(sandbox: Path) -> None:
-    """BD-5：LLM 跳过 render_game 谎称完成 → 双层验证必须报问题。"""
+    """BD-5: an LLM that skips render_game while claiming success → both verification layers must report problems."""
     demo = demo_module()
     settings = _settings(sandbox)
     registry = build_game_registry(settings)
 
-    shortcut_script = demo.build_script()[:3] + [  # 只做 validate/generate/export
+    shortcut_script = demo.build_script()[:3] + [  # only validate/generate/export
         _final_response("Done, everything finished and verified.")
     ]
     llm = FakeLLM(shortcut_script)
     loop = AgentLoop(client=llm, registry=registry, settings=settings, task_id="t-e2e-5")
     result = await loop.run_task(demo.GOAL)
 
-    assert result.status == "completed"  # Agent 层面"形式完成"……
+    assert result.status == "completed"  # "formally completed" at the agent layer...
     run_problems = demo.verify_agent_run(result, llm)  # type: ignore[arg-type]
     artifact_problems = demo.verify_artifacts(
         sandbox, demo.DEMO_SPEC, demo._game_config(), demo.BUNDLE_REL, demo.HTML_REL
     )
-    # ……但验证层必须揭穿：工具序列不完整 + HTML 缺失
+    # ...but the verification layer must expose it: incomplete tool sequence + missing HTML
     assert any("tool call sequence mismatch" in p for p in run_problems)
     assert any("html file missing" in p for p in artifact_problems)

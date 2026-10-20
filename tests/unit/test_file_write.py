@@ -1,8 +1,8 @@
-"""M1-5 file_write 单元测试（契约 §3.2；-k tool_security 命中）。
+"""M1-5 file_write unit tests (contract §3.2; matched by -k tool_security).
 
-环境说明：沙箱拦截 unlink → 不用 tmp_path fixture，用 data/ 下固定测试子目录
-（自建自清，清不掉也无妨——data/ 已被 gitignore）。宿主安全代理对跨进程残留
-目录的 mkdir(exist_ok=True) 会抛 PermissionError——一律经 _ensure_dir 容错。
+Environment note: the host sandbox blocks unlink → no tmp_path fixture; a fixed test subdirectory
+under data/ is used instead (self-created, self-cleaned; leftovers are fine — data/ is gitignored).
+The host security agent raises PermissionError on cross-process mkdir(exist_ok=True) for leftover
 """
 
 from __future__ import annotations
@@ -52,9 +52,9 @@ async def _run(sandbox: Path, path: str, content: str) -> ToolResult:
 
 
 def _ensure_symlink(source: Path, name: str, sandbox: Path) -> Path:
-    """建符号链接（目标用绝对路径，避免 POSIX 相对解析歧义）。
+    """Create a symlink (the target uses an absolute path to avoid POSIX relative-resolution ambiguity).
 
-    链接名带 pid：跨进程重复运行时旧链接残留（无法删除）不会干扰本次断言。
+    The link name carries the pid: when reruns across processes leave old links behind (undeletable), they do not disturb this assertion.
     """
     link = sandbox / f"{name}-{os.getpid()}"
     if not link.is_symlink():
@@ -91,13 +91,13 @@ async def test_file_write_blocks_symlink(sandbox: Path) -> None:
     _ensure_dir(real_dir)
     (real_dir / "inside.txt").write_text("inside", encoding="utf-8")
 
-    # 目录符号链接（即使指向沙箱内也拒绝）
+    # directory symlink (rejected even when it points inside the sandbox)
     dir_link = _ensure_symlink(real_dir, "link", sandbox)
     result = await _run(sandbox, f"{dir_link.name}/evil.txt", "x")
     assert not result.ok
     assert "symlink" in result.error
 
-    # 目标文件本身是符号链接
+    # the target file itself is a symlink
     file_link = _ensure_symlink(real_dir / "inside.txt", "file-link", sandbox)
     result = await _run(sandbox, file_link.name, "x")
     assert not result.ok
@@ -109,7 +109,7 @@ async def test_file_write_blocks_symlink(sandbox: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_file_write_blocks_prefix_confusion(sandbox: Path) -> None:
-    # 与沙箱根同前缀字符串但非子目录（data-evil 形态）——is_relative_to 组件边界证据
+    # same string prefix as the sandbox root but not a subdirectory (the data-evil shape) — evidence of the is_relative_to component boundary
     evil_dir = sandbox.parent / "file_write-evil"
     _ensure_dir(evil_dir)
     escape = _ensure_symlink(evil_dir, "escape", sandbox)
@@ -123,7 +123,7 @@ async def test_file_write_blocks_prefix_confusion(sandbox: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_security
 async def test_file_write_blocks_oversize(sandbox: Path) -> None:
-    # 字符数超限 → 参数校验层拒绝（经 registry 统一入口）
+    # character count over the limit → rejected at the parameter-validation layer (via the registry unified entry)
     registry = ToolRegistry()
     settings = Settings(data_sandbox_dir=str(sandbox))
     registry.register(file_write.build_tool_spec(settings))
@@ -133,8 +133,8 @@ async def test_file_write_blocks_oversize(sandbox: Path) -> None:
     assert not result.ok
     assert "invalid arguments" in result.error
 
-    # 字符不超限但 UTF-8 字节数超限 → executor 复核拒绝
-    result2 = await _run(sandbox, "wide.txt", "é" * 600_000)  # 60 万字符、约 1.2MB 字节
+    # characters within the limit but UTF-8 bytes over the limit → rejected at the executor recheck
+    result2 = await _run(sandbox, "wide.txt", "é" * 600_000)  # 600k characters ≈ 1.2MB of bytes
     assert not result2.ok
     assert "content too large" in result2.error
     assert "BLOCKED" in result2.error

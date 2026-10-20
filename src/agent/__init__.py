@@ -1,4 +1,4 @@
-"""agent 包组装入口：build_registry（契约 §4，agent → tools 方向合法）。"""
+"""agent package assembly entry: build_registry (contract §4; the agent → tools direction is legal)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from src.tools import calc, file_write, http_request
 
 
 def build_registry(settings: Settings) -> ToolRegistry:
-    """注册 M1 三工具（calc / http_request / file_write）。"""
+    """Register the three M1 tools (calc / http_request / file_write)."""
     registry = ToolRegistry()
     registry.register(calc.build_tool_spec(settings))
     registry.register(http_request.build_tool_spec(settings))

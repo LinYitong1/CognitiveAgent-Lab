@@ -1,31 +1,31 @@
-"""B3 端到端 Demo：FakeLLM 驱动的完整 Agent 工作流（用户批准 B3 范围）。
+"""B3 end-to-end demo: the full agent workflow driven by a scripted fake LLM (user-approved B3 scope).
 
-一条自然语言任务 → 单一 AgentLoop（复用 M1，无新框架）内依次调用：
+One natural-language task → a single AgentLoop (reusing M1, no new framework) calling in order:
 
     validate_experiment → generate_trials → export_experiment
-    → validate_game → render_game → 单文件可玩 HTML
+    → validate_game → render_game → single-file playable HTML
 
-LLM 为内置 ScriptedLLM（LLMClientProtocol 的鸭子类型实现）：按轮次弹出预设
-响应，模拟"模型设计出合法 ExperimentSpec 与 GameSpec"的过程。预设响应中的
-experiment_ref 六项指纹由确定性引擎预计算（build_bundle 同 spec+seed 逐字节
-可复现，故与 export_experiment 实际产物必然一致）。
+The LLM is an inline ScriptedLLM (a duck-typed LLMClientProtocol implementation): it pops preset
+responses round by round, simulating "the model designs a valid ExperimentSpec and GameSpec". The
+six experiment_ref fingerprints in the preset responses are precomputed by the deterministic engine
+(build_bundle is byte-reproducible for the same spec+seed, so they necessarily match what export_experiment produces).
 
-零真实 LLM、零密钥、零网络（CALC_AGENT_ENV_FILE=/dev/null 亦可运行）。
+Zero real LLM, zero keys, zero network (runs even with CALC_AGENT_ENV_FILE=/dev/null).
 
-运行（仓库根目录）：
+Run (from the repo root):
     .venv/bin/python examples/run_game_agent.py
 
-沙箱根目录可用环境变量 DATA_SANDBOX_DIR 覆盖（默认 data/）。
+The sandbox root can be overridden via the DATA_SANDBOX_DIR environment variable (default data/).
 
-验证契约（任何失败 → 非零退出，绝不静默忽略）：
-  脚本级 verify_agent_run：状态 completed、5 个工具按序调用、全部
-  tool_result ok、各工具域级报告 valid/rendered 均为 true；
-  产物级 verify_artifacts：verify_bundle 独立校验、bundle 与确定性重算
-  逐字节一致（剥离 generated_at）、GameSpec 对实际 bundle 校验通过、
-  HTML 与确定性渲染逐字节一致、双指纹锚点存在、试次数一致。
+Verification contract (any failure → non-zero exit, never silently ignored):
+  run-level verify_agent_run: status completed, 5 tools called in order, all
+  tool_result ok, and every domain report valid/rendered true;
+  artifact-level verify_artifacts: independent verify_bundle check, bundle byte-identical
+  to the deterministic recomputation (generated_at stripped), GameSpec validated against the
+  actual bundle, HTML byte-identical to the deterministic render, dual fingerprint anchors present, trial count reconciled.
 
-打开游戏：用浏览器直接打开 data/games/demo-agent-game.html（file:// 直开）。
-提示：浏览器原型计时为近似值，不用于正式数据收集。
+Open the game: open data/games/demo-agent-game.html directly in a browser (file://).
+Note: browser prototype timing is approximate; not for formal data collection.
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ TASK_ID = "demo-game-agent"
 BUNDLE_REL = "experiments/demo-agent-game.json"
 HTML_REL = "games/demo-agent-game.html"
 
-# 通用示例实验（刻意不绑定任何认知实验范式）：
-# 单因素 side（left/right），2 区组共 24 试次，选择反应、正确性来自因素水平。
+# Generic demo experiment (deliberately not bound to any cognitive paradigm):
+# single factor side (left/right), 2 blocks / 24 trials, choice response, correctness from the factor level.
 DEMO_SPEC: dict[str, object] = {
     "schema_version": 1,
     "name": "demo-agent-game",
@@ -77,10 +77,10 @@ DEMO_SPEC: dict[str, object] = {
 }
 
 GOAL = (
-    "为以下任务生成一个可玩的浏览器游戏：设计一个单因素二水平的选择反应实验"
-    "（因素 side，水平 left/right；practice 4 试次 + main 20 试次，seed=11），"
-    "先验证实验设计并生成试次，导出实验包；然后为该实验设计键盘操作的 GameSpec，"
-    "校验通过后渲染为单文件 HTML 游戏。"
+    "Generate a playable browser game for the following task: design a single-factor two-level "
+    "choice-reaction experiment (factor side, levels left/right; practice 4 trials + main 20 "
+    "trials, seed=11). Validate the design and generate trials first, export the bundle; then "
+    "design a keyboard-driven GameSpec, validate it, and render a single-file HTML game."
 )
 
 EXPECTED_TOOLS = [
@@ -93,7 +93,7 @@ EXPECTED_TOOLS = [
 
 
 class ScriptedLLM:
-    """按轮次弹出预设响应的假 LLM（LLMClientProtocol 鸭子类型；记录完整消息历史）。"""
+    """Fake LLM popping preset responses round by round (duck-typed LLMClientProtocol; records the full message history)."""
 
     def __init__(self, script: list[LLMResponse]) -> None:
         self._script = list(script)
@@ -114,7 +114,7 @@ class ScriptedLLM:
 
 
 def _expected_ref() -> dict[str, object]:
-    """预计算 export_experiment 产物的六项指纹（确定性引擎保证与实际产物一致）。"""
+    """Precompute the six fingerprints of the export_experiment output (the deterministic engine guarantees they match the actual artifact)."""
     bundle = build_bundle(ExperimentSpec.model_validate(DEMO_SPEC))
     spec_part = bundle["spec"]  # type: ignore[index]
     repro = bundle["reproducibility"]  # type: ignore[index]
@@ -129,7 +129,7 @@ def _expected_ref() -> dict[str, object]:
 
 
 def _game_config() -> dict[str, object]:
-    """预设的 GameSpec（模拟 LLM 的游戏设计产物；六项引用来自确定性预计算）。"""
+    """Preset GameSpec (simulating the LLM's game-design output; the six reference values come from deterministic precomputation)."""
     return {
         "schema_version": 1,
         "game": {"name": "demo-agent-game", "version": "0.1.0"},
@@ -156,7 +156,7 @@ def _call(remote_id: str, name: str, arguments: dict[str, object]) -> LLMRespons
 
 
 def build_script() -> list[LLMResponse]:
-    """预设响应脚本：5 个工具调用 + 1 条最终答复。"""
+    """Preset response script: 5 tool calls + 1 final answer."""
     game = _game_config()
     return [
         _call("demo-1", "validate_experiment",
@@ -181,11 +181,11 @@ def build_script() -> list[LLMResponse]:
 
 
 # ---------------------------------------------------------------------------
-# 验证（两层；任何失败收集为 problem，main 统一裁决退出码）
+# Verification (two layers; any failure is collected as a problem, main decides the exit code)
 # ---------------------------------------------------------------------------
 
 def verify_agent_run(result: object, llm: ScriptedLLM) -> list[str]:
-    """脚本级验证：AgentLoop 状态 / 工具序列 / 工具级 ok / 域级 valid+rendered。"""
+    """Run-level verification: AgentLoop status / tool sequence / tool-level ok / domain-level valid+rendered."""
     problems: list[str] = []
     status = getattr(result, "status", None)
     if status != "completed":
@@ -209,7 +209,7 @@ def verify_agent_run(result: object, llm: ScriptedLLM) -> list[str]:
     if bad_results:
         problems.append(f"tool-level failures (BLOCKED): {bad_results}")
 
-    # 域级报告：从最后一轮消息历史取全部 tool 报告（完整未截断）
+    # Domain reports: take all tool reports from the last round of message history (full, untruncated)
     if not llm.received_messages:
         problems.append("no LLM rounds recorded")
         return problems
@@ -224,7 +224,7 @@ def verify_agent_run(result: object, llm: ScriptedLLM) -> list[str]:
         )
         return problems
 
-    # reports 顺序即调用顺序：validate / generate / export / validate_game / render
+    # reports are in call order: validate / generate / export / validate_game / render
     checks: list[tuple[str, str, dict[str, object] | None]] = []
     for label, text in zip(("validate_experiment", "generate_trials"), reports[:2]):
         try:
@@ -272,7 +272,7 @@ def verify_artifacts(
     bundle_rel: str,
     html_rel: str,
 ) -> list[str]:
-    """产物级验证：bundle 完整性/可复现性 + HTML 确定性 + 双指纹锚点 + 试次数一致。"""
+    """Artifact-level verification: bundle integrity/reproducibility + HTML determinism + dual fingerprint anchors + trial-count consistency."""
     problems: list[str] = []
     bundle_path = sandbox / bundle_rel
     html_path = sandbox / html_rel
@@ -282,7 +282,7 @@ def verify_artifacts(
     if not html_path.is_file():
         return [f"html file missing: {html_path}"]
 
-    # ① 独立完整性校验（免生成器路径：重算双指纹）
+    # (1) independent integrity check (generator-free path: recompute both fingerprints)
     report = verify_bundle(bundle_path)
     if not report.ok:
         problems.append(f"verify_bundle failed: {report.detail}")
@@ -290,7 +290,7 @@ def verify_artifacts(
 
     actual_bundle: dict[str, object] = json.loads(bundle_path.read_text(encoding="utf-8"))
 
-    # ② 可复现性：同 spec+seed 确定性重算，剥离 generated_at 后逐字节等价
+    # (2) reproducibility: deterministic recomputation with the same spec+seed, byte-equivalent after stripping generated_at
     expected_bundle = build_bundle(ExperimentSpec.model_validate(spec))
     strip = lambda b: {k: v for k, v in b.items() if k != "generated_at"}  # noqa: E731
     if canonical_json(strip(actual_bundle)) != canonical_json(strip(expected_bundle)):
@@ -298,20 +298,20 @@ def verify_artifacts(
     if actual_bundle.get("bundle_sha256") != expected_bundle.get("bundle_sha256"):
         problems.append("bundle_sha256 differs from deterministic recomputation")
 
-    # ③ GameSpec 对实际 bundle 校验（不通过 → HTML 不可信，直接返回）
+    # (3) validate the GameSpec against the actual bundle (failure → HTML untrusted, return immediately)
     game_result = validate_game(game_config, actual_bundle)
     if not game_result.valid or game_result.game_spec is None:
         codes = [f"{e.error_code}:{e.path}" for e in game_result.errors]
         problems.append(f"validate_game against actual bundle failed: {codes}")
         return problems
 
-    # ④ HTML 确定性：与纯函数渲染结果逐字节一致
+    # (4) HTML determinism: byte-identical to the pure-function render
     expected_html = render_game_html(actual_bundle, game_result.game_spec)
     actual_html = html_path.read_text(encoding="utf-8")
     if actual_html != expected_html:
         problems.append("html on disk is not byte-identical to deterministic render")
 
-    # ⑤ 指纹锚点与试次数一致（显式复核；已被 ④ 蕴含，双保险）
+    # (5) fingerprint anchors and trial count (explicit recheck; implied by (4), double assurance)
     repro = actual_bundle["reproducibility"]  # type: ignore[index]
     for anchor_name, anchor in (
         ("bundle_sha256", actual_bundle.get("bundle_sha256")),

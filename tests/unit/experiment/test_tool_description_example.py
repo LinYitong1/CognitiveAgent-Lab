@@ -1,15 +1,15 @@
-"""R2 修订（诊断修复 F1）一致性测试：description 内嵌示例与真实 schema 逐字段一致。
+"""R2 revision (diagnostic fix F1) consistency tests: the example embedded in the description matches the real schema field for field.
 
-断言组（契约 §5.1 R2 修订约束）：
-1. 示例本身可被实际 ExperimentSpec Pydantic 模型校验，且 validate_spec → valid=true
-   零错误零警告（"经过验证的示例"的可执行证据）；
-2. description 确实包含该示例（模块级常量单一来源，防漂移）；
-3. 该 description 原样出现在发送给 LLM 的 tools schema（registry.get_schemas()）中；
-4. description 为纯 ASCII（R2 核心：消除转义密集的 schema 形态）；
-5. 长度预算：软 ≤700 / 硬 ≤900 字符（R2 口径，取代 R1 的 1600/2400）；
-6. 结构说明覆盖全部必需顶层键（不得为字符预算省略必需字段）。
+Assertion groups (contract §5.1 R2 revision constraints):
+1. the example itself validates against the real ExperimentSpec Pydantic model, and validate_spec → valid=true
+   with zero errors and zero warnings (executable evidence of a "validated example");
+2. the description really contains that example (module-level constant as the single source, preventing drift);
+3. that description appears verbatim in the tools schema sent to the LLM (registry.get_schemas());
+4. the description is pure ASCII (the R2 core: eliminating the escape-dense schema form);
+5. length budget: soft ≤700 / hard ≤900 characters (the R2 thresholds, replacing R1's 1600/2400);
+6. the structure summary covers all required top-level keys (required fields must not be dropped for the character budget).
 
-文件名含 "tool_" 以便 PA-7 的 -k "tool_" 过滤一并命中。
+The filename contains "tool_" so PA-7's -k "tool_" filter also picks it up.
 """
 
 from __future__ import annotations
@@ -28,11 +28,11 @@ REQUIRED_TOP_KEYS = ("schema_version", "name", "seed", "factors", "blocks", "res
 
 
 def test_description_example_validates_against_real_schema() -> None:
-    """示例经 json.loads → ExperimentSpec.model_validate → validate_spec 全部通过。"""
+    """The example passes json.loads → ExperimentSpec.model_validate → validate_spec in full."""
     example = json.loads(experiment_tools._SPEC_EXAMPLE_JSON)
-    # Pydantic 结构校验（V1~V9 全部在场）
+    # Pydantic structural validation (V1~V9 all present)
     ExperimentSpec.model_validate(example)
-    # 验证层语义校验（C1~C3 等）
+    # validation-layer semantic checks (C1~C3 etc.)
     result = validate_spec(example)
     assert result.valid is True
     assert result.errors == []
@@ -40,15 +40,15 @@ def test_description_example_validates_against_real_schema() -> None:
 
 
 def test_description_contains_example_constant() -> None:
-    """description 内嵌模块级常量示例（单一来源，非两处抄写）。"""
+    """The description embeds the module-level constant example (single source, not two hand copies)."""
     spec = experiment_tools.build_validate_spec(Settings())
     assert experiment_tools._SPEC_EXAMPLE_JSON in spec.description
-    # 反包装指令在场（PA-14 失败模式 B 的直接对症文本，R2 英文版）
+# the anti-wrapper instruction is present (the direct counter-text to PA-14 failure mode B, English R2 version)
     assert "no wrapper" in spec.description
 
 
 def test_description_reaches_llm_tools_schema() -> None:
-    """示例与反包装指令确实进入发送给 LLM 的 tools schema。"""
+    """The example and the anti-wrapper instruction really enter the tools schema sent to the LLM."""
     registry = ToolRegistry()
     registry.register(experiment_tools.build_validate_spec(Settings()))
     registry.register(experiment_tools.build_generate_spec(Settings()))
@@ -62,24 +62,24 @@ def test_description_reaches_llm_tools_schema() -> None:
 
 
 def test_description_is_pure_ascii() -> None:
-    """R2 核心：description 纯 ASCII（ord(c) < 128，消除 \\uXXXX 转义密集形态）。"""
+    """R2 core: the description is pure ASCII (ord(c) < 128, eliminating the \\uXXXX escape-dense form)."""
     spec = experiment_tools.build_validate_spec(Settings())
     non_ascii = [c for c in spec.description if ord(c) >= 128]
-    assert not non_ascii, f"description 含非 ASCII 字符: {non_ascii[:10]}"
+    assert not non_ascii, f"description contains non-ASCII characters: {non_ascii[:10]}"
 
 
 def test_description_length_budget() -> None:
-    """token 预算护栏：软 ≤700（告警阈值），硬 ≤900（拒绝阈值）。"""
+    """Token-budget guard: soft ≤700 (warning threshold), hard ≤900 (rejection threshold)."""
     spec = experiment_tools.build_validate_spec(Settings())
     length = len(spec.description)
-    assert length <= DESCRIPTION_HARD_BUDGET, f"description 超过硬预算: {length} chars"
+    assert length <= DESCRIPTION_HARD_BUDGET, f"description exceeds the hard budget: {length} chars"
     assert length <= DESCRIPTION_SOFT_BUDGET, (
-        f"description 超过软预算: {length} chars（需 Architect 复核示例精简）"
+        f"description exceeds the soft budget: {length} chars (the Architect must review the example for brevity)"
     )
 
 
 def test_description_covers_required_top_keys() -> None:
-    """结构说明不得为字符预算省略必需顶层键（契约 R2 约束 5）。"""
+    """The structure summary must not drop required top-level keys for the character budget (contract R2 constraint 5)."""
     spec = experiment_tools.build_validate_spec(Settings())
     for key in REQUIRED_TOP_KEYS:
-        assert key in spec.description, f"结构说明缺失必需键: {key}"
+        assert key in spec.description, f"structure summary is missing a required key: {key}"

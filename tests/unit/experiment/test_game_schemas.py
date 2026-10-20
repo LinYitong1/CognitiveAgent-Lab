@@ -1,7 +1,7 @@
-"""Phase B B0 验收测试：GameSpec schema 与 validate_game（契约 §6 GB-1~GB-10）。
+"""Phase B B0 acceptance tests: the GameSpec schema and validate_game (contract §6 GB-1~GB-10).
 
-fixture 通用性（GB-10）：全部引用黄金 Bundle tests/golden/generic-2x2-seed7.json，
-动态读取其真实六项指纹构造合法 GameSpec——不手写任何指纹、不构造范式特定数据。
+Fixture genericity (GB-10): all references use the golden bundle tests/golden/generic-2x2-seed7.json,
+reading its real six fingerprints dynamically to build a legal GameSpec — no hand-written fingerprints, no paradigm-specific data.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from src.experiment.game_schemas import (
 
 GOLDEN_BUNDLE_PATH = Path(__file__).resolve().parents[2] / "golden" / "generic-2x2-seed7.json"
 
-# 实验层拥有权字段（契约 §1 D-1 禁止名集合；GB-8 内省豁免 ExperimentRef 子树）
+# experiment-layer ownership fields (the forbidden-name set of contract §1 D-1; the GB-8 introspection exempts the ExperimentRef subtree)
 FORBIDDEN_FIELD_NAMES = frozenset(
     {"trials", "factors", "blocks", "constraints", "correct", "correct_from", "timing", "responses"}
 )
@@ -46,7 +46,7 @@ def _ref_from_bundle(bundle: dict[str, object]) -> dict[str, object]:
 
 
 def _valid_game_spec(bundle: dict[str, object]) -> dict[str, object]:
-    """最小合法 GameSpec：引用黄金 Bundle + 为首个 choice 响应绑定全部选项。"""
+    """Minimal legal GameSpec: references the golden bundle + binds all options for the first choice response."""
     responses = bundle["spec"]["responses"]  # type: ignore[index]
     choice = next(r for r in responses if r["kind"] == "choice")  # type: ignore[union-attr]
     keys = {chr(ord("a") + i): option for i, option in enumerate(choice["options"])}  # type: ignore[call-overload]
@@ -62,7 +62,7 @@ def _valid_game_spec(bundle: dict[str, object]) -> dict[str, object]:
     }
 
 
-# ---------- GB-1：最小合法 GameSpec 通过 G1+G2 ----------
+# ---------- GB-1: the minimal legal GameSpec passes G1+G2 ----------
 
 
 def test_gb1_minimal_valid_game_spec_passes() -> None:
@@ -74,13 +74,13 @@ def test_gb1_minimal_valid_game_spec_passes() -> None:
     assert result.game_config_fingerprint is not None
 
 
-# ---------- GB-2：未声明字段逐模型拒绝（防线 D-1） ----------
+# ---------- GB-2: undeclared fields rejected per model (defense D-1) ----------
 
 
 @pytest.mark.parametrize(
     "inject_path",
     [
-        ["rogue_field"],  # 顶层
+        ["rogue_field"],  # top level
         ["game", "rogue_field"],
         ["experiment_ref", "rogue_field"],
         ["scene", "rogue_field"],
@@ -89,9 +89,9 @@ def test_gb1_minimal_valid_game_spec_passes() -> None:
         ["feedback", "rogue_field"],
         ["flow", "rogue_field"],
         ["gamification", "rogue_field"],
-        ["trials"],  # 试图夹带实验语义（试次）
-        ["correct_from"],  # 试图夹带正确性判定
-        ["constraints"],  # 试图夹带实验约束
+        ["trials"],  # attempted smuggling of experiment semantics (trials)
+        ["correct_from"],  # attempted smuggling of correctness determination
+        ["constraints"],  # attempted smuggling of experiment constraints
     ],
 )
 def test_gb2_unknown_fields_rejected(inject_path: list[object]) -> None:
@@ -108,7 +108,7 @@ def test_gb2_unknown_fields_rejected(inject_path: list[object]) -> None:
     assert any(e.error_code == "SCHEMA_INVALID" for e in result.errors)
 
 
-# ---------- GB-3：指纹格式 + 六项引用逐一变异 ----------
+# ---------- GB-3: fingerprint format + the six references mutated one by one ----------
 
 
 def test_gb3_fingerprint_format_enforced() -> None:
@@ -143,7 +143,7 @@ def test_gb3_reference_mismatch_detected(field: str, value: object) -> None:
 
 
 def test_gb3_tampered_bundle_detected() -> None:
-    """整包完整性：手改 Bundle 任一内容 → 重算指纹失配 → REF_MISMATCH。"""
+    """Whole-bundle integrity: hand-editing any bundle content → recomputed fingerprint mismatch → REF_MISMATCH."""
     bundle = _load_bundle()
     tampered = copy.deepcopy(bundle)
     tampered["trials"][0]["factors"] = {"difficulty": "easy"}  # type: ignore[index]
@@ -154,7 +154,7 @@ def test_gb3_tampered_bundle_detected() -> None:
     )
 
 
-# ---------- GB-4：绑定规则错误码全正反例 ----------
+# ---------- GB-4: binding-rule error codes, full positive and negative cases ----------
 
 
 def test_gb4_unknown_response() -> None:
@@ -166,12 +166,12 @@ def test_gb4_unknown_response() -> None:
 
 
 def test_gb4_invalid_binding_target_text_response() -> None:
-    """绑定到非 choice 响应 → INVALID_BINDING_TARGET（构造含 text 响应的合法 spec 变体）。"""
+    """Binding to a non-choice response → INVALID_BINDING_TARGET (builds a legal spec variant containing a text response)."""
     bundle = _load_bundle()
     spec = _valid_game_spec(bundle)
-    # 在 spec 侧 bundle 副本追加 text 响应（bundle 深拷贝 + 重算指纹不必要——
-    # 直接改为把绑定指向黄金 Bundle 中不存在的 choice 之外的构造：
-    # 黄金 Bundle 仅一个 choice 响应，故构造局部 bundle 副本）
+    # append a text response on the spec side of a bundle copy (deep-copying the bundle and recomputing
+    # fingerprints is unnecessary — instead, point the binding at a construction that does not exist
+    # among the golden bundle's choices: the golden bundle has exactly one choice response, so a local bundle copy is built)
     local_bundle = copy.deepcopy(bundle)
     local_bundle["spec"]["responses"].append(  # type: ignore[index]
         {"name": "notes", "kind": "text", "options": [], "scale": None, "correct_from": None}
@@ -221,7 +221,7 @@ def test_gb4_invalid_key_format(bad_key: str) -> None:
     assert any(e.error_code == "INVALID_KEY" for e in result.errors)
 
 
-# ---------- GB-5：错误报告结构完整 ----------
+# ---------- GB-5: complete error-report structure ----------
 
 
 def test_gb5_error_report_structure() -> None:
@@ -237,7 +237,7 @@ def test_gb5_error_report_structure() -> None:
         assert issue.suggestion
 
 
-# ---------- GB-6：合法但含警告（部分选项覆盖） ----------
+# ---------- GB-6: legal but with a warning (partial option coverage) ----------
 
 
 def test_gb6_partial_option_coverage_warns() -> None:
@@ -246,7 +246,7 @@ def test_gb6_partial_option_coverage_warns() -> None:
     responses = bundle["spec"]["responses"]  # type: ignore[index]
     choice = next(r for r in responses if r["kind"] == "choice")  # type: ignore[union-attr]
     options = choice["options"]  # type: ignore[union-attr]
-    # 只绑定第一个选项 → 另一选项不可达 → 警告但合法
+    # bind only the first option → the other option is unreachable → warning but legal
     spec["input"]["bindings"][0]["keys"] = {"a": options[0]}  # type: ignore[index]
     result = validate_game(spec, bundle)
     assert result.valid is True
@@ -254,7 +254,7 @@ def test_gb6_partial_option_coverage_warns() -> None:
     assert any(w.error_code == "PARTIAL_OPTION_COVERAGE" for w in result.warnings)
 
 
-# ---------- GB-7：指纹确定性 ----------
+# ---------- GB-7: fingerprint determinism ----------
 
 
 def test_gb7_fingerprint_key_order_and_whitespace_insensitive() -> None:
@@ -262,7 +262,7 @@ def test_gb7_fingerprint_key_order_and_whitespace_insensitive() -> None:
     spec = _valid_game_spec(bundle)
     reference = game_config_fingerprint(GameSpec.model_validate(spec))
 
-    # 键序打乱 + 添加空白（重新序列化再解析）
+    # key order shuffled + whitespace added (re-serialized, then re-parsed)
     shuffled = json.loads(json.dumps(spec, indent=4, sort_keys=False))
     reordered = {k: shuffled[k] for k in reversed(list(shuffled))}
     assert game_config_fingerprint(GameSpec.model_validate(reordered)) == reference
@@ -278,11 +278,11 @@ def test_gb7_fingerprint_changes_on_any_field_change() -> None:
     assert game_config_fingerprint(GameSpec.model_validate(variant)) != reference
 
 
-# ---------- GB-8：内省断言——字段树 ∩ 禁止名集合 = ∅（豁免 ExperimentRef） ----------
+# ---------- GB-8: introspection assertion — field tree ∩ forbidden-name set = ∅ (ExperimentRef exempt) ----------
 
 
 def _collect_field_names(model: type[object], _seen: set[type[object]] | None = None) -> set[str]:
-    """递归收集模型字段名（豁免 ExperimentRef 子树——其字段均为只读引用复制）。"""
+    """Recursively collect model field names (the ExperimentRef subtree is exempt — its fields are read-only reference copies)."""
     seen: set[type[object]] = _seen or set()
     if model in seen or model is ExperimentRef:
         return set()
@@ -304,7 +304,7 @@ def test_gb8_no_experiment_logic_fields_in_game_spec() -> None:
     assert not overlap, f"GameSpec field tree contains experiment-owned names: {overlap}"
 
 
-# ---------- GB-9：体积护栏 ----------
+# ---------- GB-9: the size guard ----------
 
 
 def test_gb9_size_guard_rejects_oversized_spec() -> None:
@@ -322,7 +322,7 @@ def test_gb9_size_guard_passes_normal_spec() -> None:
     assert result.valid is True
 
 
-# ---------- GB-10：通用性——产品源码无范式名硬编码 ----------
+# ---------- GB-10: genericity — no paradigm names hardcoded in product source ----------
 
 
 def test_gb10_no_paradigm_hardcoding_in_product_source() -> None:
@@ -332,14 +332,14 @@ def test_gb10_no_paradigm_hardcoding_in_product_source() -> None:
 
 
 def test_gb10_fixtures_derive_from_golden_bundle() -> None:
-    """合法 fixture 的六项引用全部来自黄金 Bundle 实际值（无手写指纹）。"""
+    """All six references of the legal fixture come from the golden bundle's actual values (no hand-written fingerprints)."""
     bundle = _load_bundle()
     spec = _valid_game_spec(bundle)
     result = validate_game(spec, bundle)
-    assert result.valid is True  # 若手写指纹则 G2 必然失配
+    assert result.valid is True  # with hand-written fingerprints, G2 would necessarily mismatch
 
 
-# ---------- 补充：非 dict 输入 / Pydantic 直接使用 ----------
+# ---------- supplement: non-dict input / direct Pydantic use ----------
 
 
 def test_non_dict_input_rejected() -> None:

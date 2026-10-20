@@ -1,8 +1,8 @@
-"""M1 集成测试：真实 AgentLoop + 真实工具 + FakeLLM（契约 §3.2）。
+"""M1 integration tests: the real AgentLoop + real tools + FakeLLM (contract §3.2).
 
-对应验收：M1-1（-k loop）、M1-3（-k tool_failure）、M1-4（-k max_steps）。
-环境说明：沙箱拦截 unlink → 不用 tmp_path fixture，用 data/ 下固定测试子目录
-（自建自清，清不掉也无妨——data/ 已被 gitignore）。
+Acceptance mapping: M1-1 (-k loop), M1-3 (-k tool_failure), M1-4 (-k max_steps).
+Environment note: the host sandbox blocks unlink → no tmp_path fixture; a fixed test subdirectory
+under data/ is used instead (self-created, self-cleaned; leftovers are fine — data/ is gitignored).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ LOGS_DIR = Path("logs")
 
 
 def _try_cleanup(path: Path) -> None:
-    """尽力清理；沙箱拦截删除时容忍残留（data/ 已 gitignore）。"""
+    """Best-effort cleanup; tolerate leftovers when the sandbox blocks deletion (data/ is gitignored)."""
     try:
         shutil.rmtree(path)
     except OSError:
@@ -35,7 +35,7 @@ def _try_cleanup(path: Path) -> None:
 
 
 def _ensure_dir(path: Path) -> None:
-    """mkdir 容错：宿主安全代理对跨进程残留目录会抛 PermissionError。"""
+    """mkdir tolerance: the host security agent raises PermissionError on cross-process leftover directories."""
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -58,7 +58,7 @@ def _settings(sandbox: Path, max_steps: int = 10) -> Settings:
 @pytest.mark.asyncio
 @pytest.mark.loop
 async def test_loop_completes_multistep_task(sandbox: Path) -> None:
-    """M1-1：多步任务 happy path——事件序列、seq、tool_call_id、JSONL、产出文件。"""
+    """M1-1: multi-step task happy path — event sequence, seq, tool_call_id, JSONL, output files."""
     script = [
         LLMResponse(
             tool_calls=[
@@ -86,7 +86,7 @@ async def test_loop_completes_multistep_task(sandbox: Path) -> None:
     assert result.result == "done"
     assert result.steps == 3
 
-    # 事件序列（无 thought）与 seq 连续性
+# event sequence (no thought) and seq continuity
     assert [event.type for event in result.events] == [
         AgentEventType.status,
         AgentEventType.tool_call,
@@ -97,7 +97,7 @@ async def test_loop_completes_multistep_task(sandbox: Path) -> None:
     ]
     assert [event.seq for event in result.events] == [1, 2, 3, 4, 5, 6]
 
-    # tool_call / tool_result 的 tool_call_id 成对相等且形如 call_0002
+# tool_call / tool_result tool_call_id pairs are equal and look like call_0002
     tool_calls = [e for e in result.events if e.type == AgentEventType.tool_call]
     tool_results = [e for e in result.events if e.type == AgentEventType.tool_result]
     for call_event, result_event in zip(tool_calls, tool_results):
@@ -107,13 +107,13 @@ async def test_loop_completes_multistep_task(sandbox: Path) -> None:
     assert tool_results[0].payload["ok"] is True
     assert tool_results[0].payload["result_summary"] == "7"
 
-    # JSONL 存在且逐行与内存事件一致（先落盘）
+# the JSONL exists and line-by-line matches the in-memory events (disk first)
     jsonl = LOGS_DIR / f"agent-{result.task_id}.jsonl"
     assert jsonl.exists()
     lines = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
     assert lines == [event.model_dump(mode="json") for event in result.events]
 
-    # file_write 真实产出（沙箱内）
+# file_write really produces output (inside the sandbox)
     assert (sandbox / "out.txt").read_text(encoding="utf-8") == "result: 7"
 
 
@@ -121,7 +121,7 @@ async def test_loop_completes_multistep_task(sandbox: Path) -> None:
 @pytest.mark.max_steps
 @pytest.mark.loop
 async def test_loop_step_limit(sandbox: Path) -> None:
-    """M1-4：步数上限——failed + error/final 必发，LLM 恰被调用 max_steps 次。"""
+    """M1-4: step limit — failed + error/final always emitted; the LLM is called exactly max_steps times."""
     script = [
         LLMResponse(
             tool_calls=[ToolCallRequest(remote_id=f"fake-{i}", tool_name="calc", arguments={"expression": f"{i}+{i}"})],
@@ -129,7 +129,7 @@ async def test_loop_step_limit(sandbox: Path) -> None:
         )
         for i in range(3)
     ]
-    fake = FakeLLM(script)  # 第 4 次调用会 AssertionError——loop 不得调用第 4 次
+    fake = FakeLLM(script)  # the 4th call raises AssertionError — the loop must not make a 4th call
     settings = _settings(sandbox, max_steps=3)
     loop = AgentLoop(client=fake, registry=build_registry(settings), settings=settings)
     result = await loop.run_task("never finishes")
@@ -144,7 +144,7 @@ async def test_loop_step_limit(sandbox: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.tool_failure
 async def test_loop_tool_failure_not_fatal(sandbox: Path) -> None:
-    """M1-3：工具失败不致命——BLOCKED 回传 LLM（ERROR: 前缀），任务继续完成。"""
+    """M1-3: tool failure is not fatal — BLOCKED goes back to the LLM (ERROR: prefix), the task still completes."""
     script = [
         LLMResponse(
             tool_calls=[
@@ -163,28 +163,28 @@ async def test_loop_tool_failure_not_fatal(sandbox: Path) -> None:
     loop = AgentLoop(client=fake, registry=build_registry(settings), settings=settings)
     result = await loop.run_task("try to escape the sandbox")
 
-    # 第一轮 tool_result 被 BLOCKED
+# the first round's tool_result is BLOCKED
     first_tool_result = next(e for e in result.events if e.type == AgentEventType.tool_result)
     assert first_tool_result.payload["ok"] is False
     assert "BLOCKED" in str(first_tool_result.payload["result_summary"])
 
-    # 错误回传 LLM：第二轮 messages 含 tool message 且以 ERROR: 开头
+# the error goes back to the LLM: round-2 messages contain a tool message starting with ERROR:
     second_round = fake.received_messages[1]
     tool_messages = [m for m in second_round if m.get("role") == "tool"]
     assert tool_messages
     assert tool_messages[0]["content"].startswith("ERROR:")
 
-    # 任务不悬挂，最终完成
+# the task does not hang; it ultimately completes
     assert result.status == "completed"
     assert result.result == "recovered"
-    # 沙箱外未产生文件
+# no files were produced outside the sandbox
     assert not (sandbox.parent.parent / "evil.txt").exists()
 
 
 @pytest.mark.asyncio
 @pytest.mark.loop
 async def test_loop_llm_error_fails_task(sandbox: Path) -> None:
-    """M1-3 补充：LLM 不可恢复异常 → 任务 failed，error + final 必发。"""
+    """M1-3 supplement: an unrecoverable LLM exception → the task fails; error + final always emitted."""
     settings = _settings(sandbox)
     loop = AgentLoop(client=ExplodingLLM(), registry=build_registry(settings), settings=settings)
     result = await loop.run_task("boom")

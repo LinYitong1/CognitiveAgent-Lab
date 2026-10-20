@@ -1,4 +1,4 @@
-"""FakeLLM：LLMClientProtocol 的鸭子类型实现（契约 §3.1，不进 src/）。"""
+"""FakeLLM: a duck-typed LLMClientProtocol implementation (contract §3.1; never enters src/)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ Message = dict[str, Any]
 
 
 class FakeLLM:
-    """按轮次弹出预设脚本，记录每轮收到的 messages 供断言。"""
+    """Pops the preset script round by round; records the messages received each round for assertions."""
 
     def __init__(self, script: Sequence[LLMResponse]) -> None:
         self._script: list[LLMResponse] = list(script)
@@ -27,7 +27,7 @@ class FakeLLM:
 
 
 class ExplodingLLM:
-    """chat 恒抛异常（模拟 SDK 重试耗尽）。"""
+    """chat always raises (simulates SDK retries exhausted)."""
 
     def __init__(self) -> None:
         self.calls = 0

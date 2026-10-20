@@ -1,7 +1,7 @@
-"""Phase B B2 验收测试：确定性 HTML 渲染器（契约 §11.10 BR-1~BR-5、BR-7、BR-8、BR-10）。
+"""Phase B B2 acceptance tests: the deterministic HTML renderer (contract §11.10 BR-1~BR-5, BR-7, BR-8, BR-10).
 
-fixture 通用性（BR-10）：演示 GameSpec 从黄金 Bundle 动态派生，键位绑定由
-响应 options 首字母程序化生成——无手写指纹、无范式特定数据。
+Fixture genericity (BR-10): the demo GameSpec is derived dynamically from the golden bundle; key
+bindings are generated programmatically from the first letters of the response options — no hand-written fingerprints, no paradigm-specific data.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 GOLDEN_BUNDLE_PATH = PROJECT_ROOT / "tests" / "golden" / "generic-2x2-seed7.json"
 GOLDEN_HTML_PATH = PROJECT_ROOT / "tests" / "golden" / "game-generic-demo.html"
 
-# 模板固有的 script 标签数（数据块 + 引擎块各一对）
+# the number of script tags inherent to the template (one pair for the data block and one for the engine block)
 _TEMPLATE_SCRIPT_TAGS = 2
 
 
@@ -32,7 +32,7 @@ def _load_bundle() -> dict[str, object]:
 
 
 def demo_game_spec(bundle: dict[str, object]) -> dict[str, object]:
-    """演示 GameSpec（黄金渲染文件的单一来源；键位=options 首字母，程序化生成）。"""
+    """Demo GameSpec (the single source of the golden rendered file; keys = option first letters, generated programmatically)."""
     spec_part = cast(dict[str, object], bundle["spec"])
     repro = cast(dict[str, object], bundle["reproducibility"])
     responses = cast(list[object], spec_part["responses"])
@@ -73,10 +73,10 @@ def _render(bundle: dict[str, object]) -> str:
     return render_game_html(bundle, _validated_spec(bundle))
 
 
-# ---------- 提取辅助（从最终 HTML 反向提取嵌入数据，不信任中间产物） ----------
+# ---------- extraction helpers (extract embedded data back from the final HTML; intermediate artifacts are not trusted) ----------
 
 def _extract_string_literal(html: str, pattern: str) -> str:
-    """提取 JS 字符串字面量体（转义形态）并 json.loads 还原为原始文本。"""
+    """Extract the JS string literal body (escaped form) and json.loads it back to the original text."""
     m = re.search(pattern, html)
     assert m is not None, f"pattern not found: {pattern}"
     return cast(str, json.loads('"' + m.group(1) + '"'))
@@ -95,7 +95,7 @@ def _extract_bundle_canonical(html: str) -> str:
     return _extract_string_literal(html, r'const BUNDLE_CANONICAL = "(.*?)(?<!\\)";')
 
 
-# ---------- BR-1：确定性 + 黄金文件 ----------
+# ---------- BR-1: determinism + golden file ----------
 
 def test_br1_render_is_deterministic() -> None:
     bundle = _load_bundle()
@@ -114,7 +114,7 @@ def test_br1_golden_html_shape() -> None:
     assert html.count("</script>") == _TEMPLATE_SCRIPT_TAGS
 
 
-# ---------- BR-2：run plan 数据完整性（D-4 逻辑核，无浏览器） ----------
+# ---------- BR-2: run-plan data integrity (the D-4 logic core, browser-free) ----------
 
 def test_br2_trial_steps_mirror_bundle_trials_exactly() -> None:
     bundle = _load_bundle()
@@ -123,7 +123,7 @@ def test_br2_trial_steps_mirror_bundle_trials_exactly() -> None:
     trial_steps = [s for s in steps if cast(dict[str, object], s)["type"] == "trial"]
     trials = cast(list[object], bundle["trials"])
 
-    # 一一对应且顺序一致
+# one-to-one correspondence with consistent ordering
     assert [cast(dict[str, object], s)["index"] for s in trial_steps] == [
         cast(dict[str, object], t)["index"] for t in trials
     ]
@@ -135,12 +135,12 @@ def test_br2_trial_steps_mirror_bundle_trials_exactly() -> None:
         trial = cast(dict[str, object], trial_raw)
         assert step["block"] == trial["block"]
         assert step["timing"] == trial["timing"]
-        # display 覆盖全部因素（含 stimulus 若非空）
+        # display covers all factors (plus stimulus if non-empty)
         factors = cast(dict[str, object], trial["factors"])
         display = {k: v for k, v in cast(list[list[object]], step["display"])}
         for fname, fval in factors.items():
             assert display[fname] == fval
-        # 正确答案 = Bundle 因素值（correct_from 权威来源）
+        # correct answer = the bundle's factor value (the authoritative source for correct_from)
         correct = cast(dict[str, object], step["correct"])
         for r_raw in responses:
             r = cast(dict[str, object], r_raw)
@@ -152,13 +152,13 @@ def test_br2_trial_steps_mirror_bundle_trials_exactly() -> None:
 
 
 def test_br2_extracted_plan_matches_builder() -> None:
-    """HTML 内嵌 PLAN 与 build_run_plan 输出等值（嵌入无失真）。"""
+    """The PLAN embedded in the HTML is value-equal to build_run_plan's output (lossless embedding)."""
     bundle = _load_bundle()
     html = _render(bundle)
     assert _extract_plan(html) == build_run_plan(bundle, _validated_spec(bundle))
 
 
-# ---------- BR-3：状态机流程开关 ----------
+# ---------- BR-3: state-machine flow switches ----------
 
 def _spec_with_overrides(bundle: dict[str, object], **flow: object) -> dict[str, object]:
     spec = demo_game_spec(bundle)
@@ -174,7 +174,7 @@ def test_br3_flow_flags_shape_steps() -> None:
     steps = [cast(dict[str, object], s) for s in cast(list[object], plan["steps"])]
     types = [s["type"] for s in steps]
 
-    # 默认 flow：ready 开场、块间恰一个 break、end 收尾
+    # default flow: ready opening, exactly one break between blocks, end closing
     assert types[0] == "ready"
     assert types[-1] == "end"
     breaks = [s for s in steps if s["type"] == "block_break"]
@@ -183,24 +183,24 @@ def test_br3_flow_flags_shape_steps() -> None:
     assert breaks[0]["next_block"] == "main"
     assert breaks[0]["done_trials"] == 8
     assert breaks[0]["total_trials"] == 48
-    # break 位于第 8 个试次之后（practice 8 试次）
+    # the break sits after the 8th trial (practice has 8 trials)
     first_break_idx = types.index("block_break")
     trial_positions = [i for i, t in enumerate(types) if t == "trial"]
     assert first_break_idx == trial_positions[7] + 1
 
-    # ready_screen=False → 无 ready step
+    # ready_screen=False → no ready step
     result = validate_game(_spec_with_overrides(bundle, ready_screen=False), bundle)
     assert result.valid and result.game_spec
     steps2 = [cast(dict[str, object], s) for s in cast(list[object], build_run_plan(bundle, result.game_spec)["steps"])]
     assert steps2[0]["type"] == "trial"
 
-    # block_breaks=False → 无 break step
+    # block_breaks=False → no break step
     result = validate_game(_spec_with_overrides(bundle, block_breaks=False), bundle)
     assert result.valid and result.game_spec
     steps3 = [cast(dict[str, object], s) for s in cast(list[object], build_run_plan(bundle, result.game_spec)["steps"])]
     assert all(s["type"] != "block_break" for s in steps3)
 
-    # end_screen="none" → end step 仍存在（事件日志必须可导出）但 summary=False
+    # end_screen="none" → the end step still exists (the event log must stay exportable) but summary=False
     result = validate_game(_spec_with_overrides(bundle, end_screen="none"), bundle)
     assert result.valid and result.game_spec
     steps4 = [cast(dict[str, object], s) for s in cast(list[object], build_run_plan(bundle, result.game_spec)["steps"])]
@@ -208,7 +208,7 @@ def test_br3_flow_flags_shape_steps() -> None:
     assert steps4[-1]["summary"] is False
 
 
-# ---------- BR-4：表现层隔离（GameSpec 呈现字段不得影响实验数据） ----------
+# ---------- BR-4: presentation-layer isolation (GameSpec presentation fields must not affect experiment data) ----------
 
 def test_br4_presentation_changes_do_not_touch_trial_steps() -> None:
     bundle = _load_bundle()
@@ -229,7 +229,7 @@ def test_br4_presentation_changes_do_not_touch_trial_steps() -> None:
     assert base_steps == varied_steps
 
 
-# ---------- BR-5：输出安全（转义 + 引擎静态约束） ----------
+# ---------- BR-5: output security (escaping + engine static constraints) ----------
 
 def _malicious_spec(bundle: dict[str, object]) -> dict[str, object]:
     spec = demo_game_spec(bundle)
@@ -242,27 +242,27 @@ def _malicious_spec(bundle: dict[str, object]) -> dict[str, object]:
 def test_br5_malicious_text_never_breaks_out() -> None:
     bundle = _load_bundle()
     result = validate_game(_malicious_spec(bundle), bundle)
-    assert result.valid is True, result.errors  # schema 层合法（呈现文本无内容约束）
+    assert result.valid is True, result.errors  # legal at the schema layer (no content constraints on presentation text)
     assert result.game_spec is not None
     html = render_game_html(bundle, result.game_spec)
 
-    # 模板固有的 </script> 计数不被数据突破
+    # the template's inherent </script> count is not broken by data
     assert html.count("</script>") == _TEMPLATE_SCRIPT_TAGS
     assert "<script>alert" not in html
-    # <title> 中恶意文本仅以 html.escape 形态出现
+    # malicious text in <title> appears only in html.escape form
     assert "&lt;/script&gt;" in html
-    # 嵌入 PLAN 中的恶意文本经 JSON 转义后完整往返（不执行、不失真）
+    # malicious text embedded in PLAN round-trips fully after JSON escaping (not executed, not distorted)
     plan = _extract_plan(html)
     meta = cast(dict[str, object], plan["meta"])
     assert meta["title"] == "</script><script>alert(1)</script>"
     assert cast(str, meta["instructions"]).startswith("<img src=x onerror=")
-    # 引擎安全约束：无危险 DOM API / eval
+    # engine security constraints: no dangerous DOM APIs / eval
     for banned in ("innerHTML", "insertAdjacentHTML", "document.write", "eval("):
         assert banned not in html, f"banned API {banned!r} present in rendered HTML"
 
 
 def test_br5_placeholder_injection_is_inert() -> None:
-    """用户文本含模板占位符字面量时不得注入模板组装（split 交错防注入）。"""
+    """User text containing template placeholder literals must not inject into template assembly (split interleaving blocks injection)."""
     bundle = _load_bundle()
     spec = demo_game_spec(bundle)
     scene = cast(dict[str, object], spec["scene"])
@@ -272,11 +272,11 @@ def test_br5_placeholder_injection_is_inert() -> None:
     html = render_game_html(bundle, result.game_spec)
     plan = _extract_plan(html)
     assert cast(dict[str, object], plan["meta"])["title"] == "__TITLE__ __BODY_CLASS__ __DATA__"
-    # 模板结构未被破坏：占位符仅出现在数据字符串内（转义后），HTML 仍含两对 script 标签
+    # the template structure is not broken: placeholders appear only inside data strings (escaped); the HTML still has two script tag pairs
     assert html.count("<script>") == _TEMPLATE_SCRIPT_TAGS
 
 
-# ---------- BR-7：嵌入完整性锚点（构建时防线） ----------
+# ---------- BR-7: embedded integrity anchors (build-time defense) ----------
 
 def test_br7_embedded_canonical_anchors_match_fingerprints() -> None:
     bundle = _load_bundle()
@@ -289,13 +289,13 @@ def test_br7_embedded_canonical_anchors_match_fingerprints() -> None:
 
     bundle_text = _extract_bundle_canonical(html)
     assert sha256_hex(bundle_text) == bundle["bundle_sha256"]
-    # 剥离口径：bundle_canonical 不含 bundle_sha256 / generated_at
+    # stripping rule: bundle_canonical excludes bundle_sha256 / generated_at
     parsed = cast(dict[str, object], json.loads(bundle_text))
     assert "bundle_sha256" not in parsed
     assert "generated_at" not in parsed
 
 
-# ---------- BR-8：运行时完整性判定（node 可用则执行，缺失 skip） ----------
+# ---------- BR-8: runtime integrity decision (run under node when available, skip otherwise) ----------
 
 _NODE_CANDIDATES = [
     shutil.which("node"),
@@ -318,7 +318,7 @@ def test_br8_runtime_integrity_check_passes_in_node() -> None:
     bundle = _load_bundle()
     html = _render(bundle)
     script1 = html.split("<script>")[1].split("</script>")[0]
-    assert "document" not in script1  # 数据块无 DOM 依赖（可被 node 独立执行的前提）
+    assert "document" not in script1  # the data block has no DOM dependency (the premise for node to run it standalone)
 
     probe = script1 + '\nconsole.log(JSON.stringify(integrity));\n'
     proc = subprocess.run([node, "-e", probe], capture_output=True, text=True, timeout=60)
@@ -345,7 +345,7 @@ def test_br8_integrity_check_detects_tampering_in_node() -> None:
     assert json.loads(proc.stdout.strip().splitlines()[-1]) == {"tampered": True}
 
 
-# ---------- BR-10：通用性 ----------
+# ---------- BR-10: genericity ----------
 
 def test_br10_no_paradigm_hardcoding_in_render_source() -> None:
     for rel in ("src/experiment/game_render.py", "src/tools/game_tools.py"):
@@ -355,6 +355,6 @@ def test_br10_no_paradigm_hardcoding_in_render_source() -> None:
 
 
 def test_br10_golden_html_derives_from_golden_bundle() -> None:
-    """黄金 HTML 由黄金 Bundle + 派生 GameSpec 渲染（BR-1 黄金匹配即证）。"""
+    """The golden HTML is rendered from the golden bundle + the derived GameSpec (proven by the BR-1 golden match)."""
     bundle = _load_bundle()
     assert sha256_hex(_render(bundle)) == sha256_hex(GOLDEN_HTML_PATH.read_text(encoding="utf-8"))

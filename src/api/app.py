@@ -1,4 +1,4 @@
-"""FastAPI 应用入口（M0：仅 /health 端点）。"""
+"""FastAPI application entry (M0: only the /health endpoint)."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from src.config import get_settings
 
 app = FastAPI(title="CognitiveAgent Lab")
 
-# M0-3 依据：无 key 环境下配置可正常加载（构造失败会在 import 时暴露）
+# M0-3 basis: the configuration loads fine in a key-less environment (a construction failure would surface at import time)
 get_settings()
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    """健康检查：body 精确为 {"status":"ok"}。"""
+    """Health check: the body is exactly {"status":"ok"}."""
     return {"status": "ok"}

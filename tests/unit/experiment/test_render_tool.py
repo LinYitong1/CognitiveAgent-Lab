@@ -1,6 +1,6 @@
-"""Phase B B2 验收测试：render_game 工具（契约 §11.10 BR-6、BR-9）。
+"""Phase B B2 acceptance tests: the render_game tool (contract §11.10 BR-6, BR-9).
 
-fixture 通用性：合法 GameSpec 从黄金 Bundle 动态派生（同 B1 测试模式）。
+Fixture genericity: the legal GameSpec is derived dynamically from the golden bundle (same pattern as the B1 tests).
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def _bundle_bytes(sandbox: Path) -> bytes:
     return (sandbox / BUNDLE_REL_PATH).read_bytes()
 
 
-# ---------- BR-6：工具级 BLOCKED ----------
+# ---------- BR-6: tool-level BLOCKED ----------
 
 @pytest.mark.asyncio
 async def test_br6_blocked_oversized_game_config(sandbox: Path) -> None:
@@ -129,14 +129,14 @@ async def test_br6_blocked_output_path_escape(sandbox: Path) -> None:
     assert res.ok is False and res.error is not None and res.error.startswith("BLOCKED:")
 
 
-# ---------- BR-6：领域级（invalid spec → 不渲染、不写文件） ----------
+# ---------- BR-6: domain-level (invalid spec → nothing rendered, nothing written) ----------
 
 @pytest.mark.asyncio
 async def test_br6_invalid_spec_renders_nothing(sandbox: Path) -> None:
     bundle = json.loads(GOLDEN_BUNDLE_PATH.read_text(encoding="utf-8"))
     config = _game_config(bundle)
     ref = cast(dict[str, object], config["experiment_ref"])
-    ref["seed"] = cast(int, ref["seed"]) + 1  # G2 失配
+    ref["seed"] = cast(int, ref["seed"]) + 1  # G2 mismatch
     tool = game_tools.build_render_game_spec(_settings(sandbox))
     res = await tool.executor(RenderGameInput.model_validate({
         "game_config": config, "bundle_path": BUNDLE_REL_PATH, "output_path": OUTPUT_REL_PATH}))
@@ -145,10 +145,10 @@ async def test_br6_invalid_spec_renders_nothing(sandbox: Path) -> None:
     assert payload["rendered"] is False
     assert payload["valid"] is False
     assert any(e["error_code"] == "REF_MISMATCH" for e in payload["errors"])
-    assert not (sandbox / OUTPUT_REL_PATH).exists()  # 零写盘
+    assert not (sandbox / OUTPUT_REL_PATH).exists()  # zero disk writes
 
 
-# ---------- BR-6：成功路径 ----------
+# ---------- BR-6: success path ----------
 
 @pytest.mark.asyncio
 async def test_br6_valid_spec_writes_playable_html(sandbox: Path) -> None:
@@ -168,15 +168,15 @@ async def test_br6_valid_spec_writes_playable_html(sandbox: Path) -> None:
     assert target.is_file()
     html = target.read_text(encoding="utf-8")
     assert html.startswith("<!DOCTYPE html>")
-    # html_sha256 与落盘内容一致
+    # html_sha256 matches the on-disk content
     from src.experiment.canonical import sha256_hex
     assert payload["html_sha256"] == sha256_hex(html)
     assert payload["bytes"] == len(html.encode("utf-8"))
-    # ExperimentBundle 前后逐字节不变（游戏工具不可修改实验数据）
+    # the ExperimentBundle is byte-identical before and after (the game tools cannot modify experiment data)
     assert _bundle_bytes(sandbox) == before
 
 
-# ---------- BR-9：组合器与 tools schema ----------
+# ---------- BR-9: combinator and tools schema ----------
 
 def test_br9_registry_registers_five_tools_with_ascii_description() -> None:
     registry = build_game_registry(Settings(data_sandbox_dir=str(TEST_SANDBOX)))

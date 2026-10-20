@@ -1,7 +1,7 @@
-"""M1 CLI 入口：经 pydantic-settings 自读 .env，驱动 AgentLoop（契约 §1.5）。
+"""M1 CLI entry point: reads .env via pydantic-settings, drives AgentLoop (contract §1.5).
 
-用法：python examples/run_agent.py "<goal>"
-退出码：completed → 0；failed → 1；缺 key → 2。
+Usage: python examples/run_agent.py "<goal>"
+Exit code: completed → 0; failed → 1; missing key → 2.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # examples/ 不是包
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # examples/ is not a package
 
 from src.agent import build_registry  # noqa: E402
 from src.agent.llm import LLMClient  # noqa: E402
@@ -26,7 +26,7 @@ def main() -> int:
     parser.add_argument("goal", help="task goal in natural language")
     goal = parser.parse_args().goal
 
-    settings = get_settings()  # 自读 .env，受 CALC_AGENT_ENV_FILE 路径覆盖
+    settings = get_settings()  # reads .env, overridable via the CALC_AGENT_ENV_FILE path
     if not settings.openai_api_key and not settings.anthropic_api_key:
         env_file = os.environ.get("CALC_AGENT_ENV_FILE", ".env")
         print(
@@ -38,7 +38,7 @@ def main() -> int:
         return 2
 
     task_id = f"task-{uuid4().hex[:12]}"
-    print(f"task_id: {task_id}")  # 首行（M1-2 的 TASK_ID 提取依据）
+    print(f"task_id: {task_id}")  # first line (extraction anchor for M1-2)
 
     client = LLMClient(settings)
     loop = AgentLoop(

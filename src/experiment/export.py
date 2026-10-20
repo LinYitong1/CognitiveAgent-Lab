@@ -1,11 +1,11 @@
-"""ExperimentBundle 组装（契约 §6.2/§6.3，冻结）。
+"""ExperimentBundle assembly (contract §6.2/§6.3, frozen).
 
-- Bundle 自包含：规范化 spec（Pydantic 解析后 model_dump，默认值补全）+ 全量 trials
-  + reproducibility（含 effective_weights / allocation per-block 口径）+ summary；
-- bundle_sha256 = SHA-256(canonical JSON(bundle 剥离 "bundle_sha256" 与 "generated_at" 两键))；
-  generated_at 不参与任何指纹（时间戳非确定性输入）；
-- allocation 只记录实际分配非 0 的组合（被过滤组合不出现）；
-- 落盘文件本身 = canonical JSON 单行（UTF-8，无 BOM）——序列化由调用方执行。
+- The bundle is self-contained: normalized spec (model_dump after Pydantic parse, defaults filled)
+  + full trials + reproducibility (incl. effective_weights / allocation per-block) + summary;
+- bundle_sha256 = SHA-256(canonical JSON(bundle with the "bundle_sha256" and "generated_at" keys stripped));
+  generated_at participates in no fingerprint (a timestamp is not a deterministic input);
+- allocation records only combinations actually allocated a non-zero count (filtered combos are absent);
+- the on-disk file itself = single-line canonical JSON (UTF-8, no BOM) — serialization is done by the caller.
 """
 
 from __future__ import annotations
@@ -26,20 +26,20 @@ from src.experiment.schemas import ExperimentSpec
 
 
 def _now_utc_iso_z() -> str:
-    """当前 UTC 时间的 ISO-8601 秒精度 Z 格式（仅用于 generated_at 元字段，不参与指纹）。"""
+    """Current UTC time as an ISO-8601 second-precision Z string (only for the generated_at meta field; part of no fingerprint)."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def combo_key(combo: tuple[str, ...]) -> str:
-    """allocation 组合键：按因素声明序以 | 连接水平名（契约 §6.2；combo 元组即声明序）。"""
+    """allocation combo key: level names joined with | in factor declaration order (contract §6.2; the combo tuple is that order)."""
     return "|".join(combo)
 
 
 def build_bundle(spec: ExperimentSpec, *, generated_at: str | None = None) -> dict[str, object]:
-    """组装 ExperimentBundle（纯计算 + 唯一时间元字段）。
+    """Assemble an ExperimentBundle (pure computation + one time meta field).
 
-    generated_at：None → 当前 UTC 时间；固定值注入用于黄金文件（PA-13）。
-    bundle_sha256 对剥离 bundle_sha256 与 generated_at 两键后的 dict 计算。
+    generated_at: None → current UTC time; a fixed value is injected for golden files (PA-13).
+    bundle_sha256 is computed over the dict with bundle_sha256 and generated_at stripped.
     """
     generated = generate_trials(spec)
     weights = effective_weights(spec)
@@ -77,5 +77,5 @@ def build_bundle(spec: ExperimentSpec, *, generated_at: str | None = None) -> di
 
 
 def bundle_canonical_text(bundle: dict[str, object]) -> str:
-    """Bundle 的 canonical JSON 文本（落盘与逐字节比对的统一形态）。"""
+    """Canonical JSON text of the bundle (the unified form for on-disk writes and byte comparisons)."""
     return canonical_json(bundle)

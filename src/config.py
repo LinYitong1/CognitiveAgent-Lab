@@ -1,8 +1,8 @@
-"""应用配置：pydantic-settings 从环境变量与 .env 文件加载（ARCHITECTURE §7）。
+"""Application configuration: pydantic-settings loads from environment variables and .env files (ARCHITECTURE §7).
 
-env_file 路径受 ``CALC_AGENT_ENV_FILE`` 环境变量覆盖（默认 ``.env``），
-设为 ``/dev/null`` 即完全绕开 .env 文件（无 key 环境验收依据）。
-M0 阶段密钥字段可为空，不校验存在性。
+The env_file path is overridable via the ``CALC_AGENT_ENV_FILE`` environment variable (default ``.env``);
+setting it to ``/dev/null`` bypasses .env entirely (the basis for key-less acceptance).
+In M0 the key fields may be empty; presence is not validated.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ _ENV_FILE: str = os.environ.get("CALC_AGENT_ENV_FILE", ".env")
 
 
 class Settings(BaseSettings):
-    """全局配置（字段与 .env.example 一一对应）。"""
+    """Global configuration (fields correspond one-to-one with .env.example)."""
 
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE,
@@ -30,15 +30,15 @@ class Settings(BaseSettings):
     calc_agent_max_steps: int = 25
     http_allowed_hosts: str = "example.com"
     data_sandbox_dir: str = "data"
-    # SEARCH_EXHAUSTED 框架能力参数（契约 §4.2；Phase A 无消费路径，Phase B 序列约束消费）
+    # SEARCH_EXHAUSTED framework capability parameter (contract §4.2; unconsumed in Phase A, consumed by Phase B sequence constraints)
     experiment_max_search_attempts: int = 100
 
     @property
     def allowed_hosts(self) -> list[str]:
-        """逗号分隔的域名白名单解析为列表。"""
+        """Parse the comma-separated host allow-list into a list."""
         return [host.strip() for host in self.http_allowed_hosts.split(",") if host.strip()]
 
 
 def get_settings() -> Settings:
-    """构造 Settings 实例（无 key 环境下也可正常构造，M0-3 依据）。"""
+    """Construct a Settings instance (works in a key-less environment, M0-3 basis)."""
     return Settings()
