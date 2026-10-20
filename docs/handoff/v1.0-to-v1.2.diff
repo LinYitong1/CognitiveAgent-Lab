@@ -1,0 +1,690 @@
+diff --git a/docs/ACCEPTANCE_CRITERIA.md b/docs/ACCEPTANCE_CRITERIA.md
+index 9744c6b..b9d7afd 100644
+--- a/docs/ACCEPTANCE_CRITERIA.md
++++ b/docs/ACCEPTANCE_CRITERIA.md
+@@ -1,59 +1,182 @@
+ # CognitiveAgent Lab — 验收标准（可执行）
+ 
+-> 版本：v1.0 ｜ 原则：每条标准都附带**可直接执行的验收命令**，QA 逐条运行并附实际输出。
++> 版本：v1.2（按架构复审 + QA 验收标准检查两轮报告修订） ｜ 原则：每条标准都附带**可直接执行的验收命令**，QA 逐条运行并附实际输出。
++> 反假阳性原则：验收命令**独立执行、独立判定**，禁止用 `||` 兜底把失败兜成通过；多行命令以表格下方代码块为准（整块退出码即判定结果）。
+ 
+ ## 通用门禁（每个里程碑、每次合入）
+ 
+ | ID | 标准 | 验收命令 | 通过判据 |
+ |----|------|----------|----------|
+-| G-1 | 测试全绿 | `bash scripts/check.sh` | pytest 退出码 0 |
+-| G-2 | 覆盖率 | `pytest --cov=src --cov-report=term` | agent/ tools/ storage/ 行覆盖 ≥ 80% |
+-| G-3 | 无硬编码密钥 | `grep -rniE "(sk-[a-z0-9]{8,}|api[_-]?key\s*=\s*[\"'][^\"']+)" src/ tests/ web/ \|\| echo CLEAN` | 输出 CLEAN |
+-| G-4 | 分层依赖正确 | `python -m scripts.check_layers`（M0 提供） | 无反向 import 报告 |
+-| G-5 | 类型检查 | `python -m pyright src/ 2>/dev/null \|\| python -m compileall -q src/` | 退出码 0 |
++| G-1 | 测试全绿 | `bash scripts/check.sh` | check.sh 内部**逐项独立执行并输出分项结果**（聚合退出码 + 分项报告）；判据为**分项全部通过**——失败可从分项报告归因到具体子门禁，不以聚合退出码单独判定 |
++| G-2 | 覆盖率 | `pytest --cov=src --cov-report=term-missing` | agent/ tools/ storage/ 行覆盖 ≥ 80%（**自 M1 起生效**——M0 尚无此三模块不适用，仅要求命令可运行不报错；term-missing 便于逐文件核对） |
++| G-3 | 无硬编码密钥 | 见下方 G-3 命令块 | **失败即阻断**：grep 退出码 1（无匹配）→ 整块退出 0 = 通过；退出码 0（有匹配）或 2（扫描出错）→ 整块退出 1 = 阻断。禁止 `|| echo CLEAN` 式兜底 |
++| G-4 | 分层依赖正确 | `python -m scripts.check_layers`（M0 提供，见 ROADMAP M0 交付物） | **退出码 0 且无反向 import 输出**（从项目根执行） |
++| G-5a | 静态类型检查 | `python -m pyright src/` | 退出码必须为 0（pyright 已列入 M0 依赖；本机 Node.js 运行时缺失导致 pyright 不可用时，视为依赖未就位、门禁不通过） |
++| G-5b | 语法编译检查 | `python -m compileall -q src/` | 退出码必须为 0 |
++
++**G-5a 与 G-5b 为两条独立检查，必须分别执行、分别判定；禁止合并为 `pyright ... || compileall ...` 之类的兜底形式——任一失败即门禁失败。** M4 可选增强：引入 `gitleaks` 或 `detect-secrets` 做依赖化密钥扫描（引入前须 Architect 更新 §2.1 依赖清单）。
++
++### G-3 命令块（整块退出码即判定结果）
++
++```bash
++grep -rniE "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
++rc=$?
++[ "$rc" -eq 1 ]
++```
++
++> 正则含 `sk-[a-z0-9_-]{8,}`（覆盖 `sk-proj-…` / `sk-ant-…` 前缀形态）。语义：grep rc=1（无匹配）→ 通过；rc=0（有匹配）或 rc=2（扫描出错）→ 阻断。check.sh 集成时须用显式 `if` 判定退出码，不可依赖 `set -e` 链（grep rc=1 是通过态，会中断 `set -e` 脚本）。测试 fixture 中的占位 key 须用明显非真实形态（如 `test-key-not-real`），避免被本扫描误报。
+ 
+ ## M0 — 脚手架
+ 
+ | ID | 标准 | 验收命令 | 通过判据 |
+ |----|------|----------|----------|
+-| M0-1 | 服务可起 | `uvicorn src.api.app:app --port 8000 &` 后 `curl -sf localhost:8000/health` | 返回 `{"status":"ok"}` |
+-| M0-2 | 测试骨架 | `pytest` | 0 failed（可 0 collected） |
+-| M0-3 | 配置从环境读取 | 删掉 `.env` 中 key 后启动 | 服务仍可起（key 仅调 LLM 时需要） |
++| M0-1 | 服务可起 | 见下方 M0-1 命令块 | 30 次就绪探测内 `/health` 返回 `{"status":"ok"}`（body 精确匹配），且服务进程被清理 |
++| M0-2 | 测试骨架（含真实测试） | `pytest` | 0 failed，且 **collected ≥ 1**——必须至少收集并通过 1 个真实测试（`/health` 端点测试），不再允许 0 collected |
++| M0-3 | 配置从环境读取（无 key 可起） | 见下方 M0-3 命令块 | 双通道清理（unset 环境变量 + `CALC_AGENT_ENV_FILE=/dev/null` 绕开 .env，见 ARCHITECTURE §7）后服务就绪且 `/health` 返回 `{"status":"ok"}` |
++| M0-4 | pyright 依赖就位 | `python -m pyright --version` | 输出版本号，退出码 0；Node.js 运行时缺失视为依赖未就位 |
++
++### M0-1 命令块（就绪等待 + 标志位收尾，防 sleep 假阳性）
++
++```bash
++uvicorn src.api.app:app --port 8000 >/tmp/m0-uvicorn.log 2>&1 &
++APP_PID=$!
++ok=0
++for i in $(seq 1 30); do
++  curl -sf localhost:8000/health | grep -q '"status":"ok"' && { ok=1; break; }
++  sleep 0.5
++done
++kill "$APP_PID" 2>/dev/null
++[ "$ok" -eq 1 ]
++```
++
++> 要点：就绪等待消除竞态；**必须用标志位收尾判定**（若循环体以 `curl && break; sleep` 收尾，全失败时最后执行的是 sleep、退出 0，构成假阳性）；body 用 grep 精确匹配实现机器判定；结束清理服务进程。
++
++### M0-3 命令块（无 key 环境，双通道清理）
++
++```bash
++env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY CALC_AGENT_ENV_FILE=/dev/null \
++  uvicorn src.api.app:app --port 8000 >/tmp/m0-nokey.log 2>&1 &
++APP_PID=$!
++ok=0
++for i in $(seq 1 30); do
++  curl -sf localhost:8000/health | grep -q '"status":"ok"' && { ok=1; break; }
++  sleep 0.5
++done
++kill "$APP_PID" 2>/dev/null
++[ "$ok" -eq 1 ]
++```
++
++> 要点：pydantic-settings 中环境变量优先级高于 .env——只 unset 不绕开 .env（或只移 .env 不 unset）都不构成有效"无 key"判据；`CALC_AGENT_ENV_FILE=/dev/null`（ARCHITECTURE §7）显式绕开 .env 文件，无需移动真实 `.env`。
+ 
+ ## M1 — Agent 核心循环
+ 
+ | ID | 标准 | 验收命令 | 通过判据 |
+ |----|------|----------|----------|
+ | M1-1 | FakeLLM 循环集成测试 | `pytest tests/integration -k loop` | 全绿，断言步数上限、事件序列 |
+-| M1-2 | 真实 LLM 多步任务 | `export $(grep -v '^#' .env \| xargs) && python examples/run_agent.py "计算 (123*456)/7 并把结果写入 out.txt"` | exit 0；out.txt 内容正确；终端打印 ≥ 2 次工具调用轨迹 |
++| M1-1b | FakeLLM 不依赖真实 key | `env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY CALC_AGENT_ENV_FILE=/dev/null python -m pytest tests/integration` | 全绿——进程环境无 key **且**绕开 .env（双通道清理），证明集成测试不依赖真实 API |
++| M1-2 | 真实 LLM 多步任务 | 见下方 M1-2 命令块 | ① run_agent exit 0；② tool_call 事件数 ≥ 2 且工具种类 ≥ 2（以 `logs/agent-<task_id>.jsonl` 统计，见 ARCHITECTURE §8）；③ `data/out.txt` 内容与 calc 实际计算结果一致（QA 复算：123×456=56088，56088÷7≈8012.57，以 calc 实际输出格式比对）；**禁止以硬编码输出冒充** |
+ | M1-3 | 工具失败不致命 | `pytest tests/unit -k tool_failure` | 工具异常被捕获并回传 LLM，任务不悬挂 |
+ | M1-4 | 步数上限 | `pytest tests/integration -k max_steps` | 超限时 Task.status=failed，原因记录在案 |
++| M1-5 | 工具安全边界 | `pytest tests/unit -k tool_security` | calc 拒绝非白名单表达式（名称/函数注入）；http_request 阻断私有 IP/云元数据/未校验重定向/DNS rebinding（注入 fake resolver 用例）；file_write 拒绝 `..` 穿越与沙箱外符号链接 |
++
++### M1-2 命令块（事件观测渠道 + 沙箱产出路径）
+ 
+-## M2 — 持久化 + API
++```bash
++python examples/run_agent.py "计算 (123*456)/7 并把结果写入 out.txt"
++echo "exit=$?"
++# run_agent 约定：启动时打印 task_id；事件落 logs/agent-<task_id>.jsonl（ARCHITECTURE §8）
++TASK_ID=<run_agent 输出的任务 ID>
++jq -r 'select(.type=="tool_call") | .payload.tool_name' "logs/agent-${TASK_ID}.jsonl" | sort | uniq -c
++cat "data/out.txt"
++```
++
++> 要点：① `examples/run_agent.py` 经 pydantic-settings **自读 .env**（受 `CALC_AGENT_ENV_FILE` 路径覆盖约束）——.env 缺失且环境无 key 时**必须显式报错退出非 0，不得静默通过**（弃用 `export $(grep … | xargs)` 模式：其空参数退出 0 会掩盖装载失败、值含空格被截断）；② 事件观测渠道明确为 JSONL 事件日志（`logs/agent-<task_id>.jsonl`）；③ 产出文件在 file_write 沙箱内，路径为 `data/out.txt`（ARCHITECTURE §6.3）；④ jq 为系统工具（macOS `brew install jq`），不属 Python 依赖白名单管辖，可用 `python -c` 等价实现替代。
++
++## M2 — 持久化 + API（含恢复语义）
+ 
+ | ID | 标准 | 验收命令 | 通过判据 |
+ |----|------|----------|----------|
+ | M2-1 | 状态即写库 | `pytest tests/unit -k storage` | 每次状态变更有对应记录 |
+-| M2-2 | 断点恢复 | 启动任务→中途 `kill -9` 服务→重启→`curl -sf -X POST localhost:8000/tasks/<id>/resume` | 任务从 checkpoint 续跑并完成 |
+-| M2-3 | SSE 事件流 | `curl -sfN localhost:8000/tasks/<id>/events`（任务运行时） | 依序收到 thought/tool_call/tool_result 事件 |
+-| M2-4 | API 契约 | `curl -sf localhost:8000/openapi.json` | schema 与 ARCHITECTURE.md §3 一致 |
++| M2-2 | 断点恢复 | 手工演练：启动任务→中途 `kill -9` 服务→重启→`curl -sf -X POST localhost:8000/tasks/<id>/resume`；自动化承载：`pytest tests/integration -k resume` | 任务从 checkpoint 续跑并完成；succeeded 调用复用结果不重执行（测试断言 ToolCall 表中 succeeded 调用无新 tool_call_id、updated_at 不变） |
++| M2-3 | SSE 事件流 | `curl -sfN localhost:8000/tasks/<id>/events \| tee /tmp/sse.log`（任务运行时） | 依序收到 `status/tool_call/tool_result` 事件（无 thought）；事件 `id:` 携带单调递增 seq；任务终止收到 `final`；落盘后可机检 seq 单调与 final 存在 |
++| M2-3b | SSE 断线重连 | 见下方 M2-3b 命令块；自动化承载：`pytest tests/integration -k sse_reconnect` | 重连后首个事件 `id:` == MAX_SEQ+1；两段拼接 seq 连续，无丢失、无重复 |
++| M2-4 | API 契约 | `curl -sf localhost:8000/openapi.json` | schema 与 ARCHITECTURE.md §3 一致（含 cancel/confirm 端点；可比对路径参数按语义，如 `{id}` vs `{task_id}`）。建议机检：`curl -sf localhost:8000/openapi.json \| jq -r '.paths \| keys[]'` 核对端点存在性 |
++| M2-5 | uncertain 非幂等恢复置 paused | 自动化承载：`pytest tests/integration -k uncertain_nonidempotent`；辅助手工演练：模拟 `file_write` 调用执行中 `kill -9`→重启→执行 `POST /tasks/<id>/resume`（**恢复为手动触发**，重启不自动扫描，见 ARCHITECTURE §5.1） | 恢复流程发现 uncertain 非幂等调用即任务置 `paused`（**非自动重试**）；`POST /tasks/<id>/tool-calls/<tool_call_id>/confirm` 确认后才继续（retry 生成新调用 ID / skip 标记 failed 回传 LLM） |
++| M2-6 | uncertain 幂等工具自动重试 | `pytest tests/integration -k uncertain_idempotent` | GET 型 http_request（调用级有效幂等性为 idempotent，见 ARCHITECTURE §6.4）uncertain→resume 自动重试一次并完成；重试仍 uncertain 则置 paused |
++| M2-7 | 并发 resume 拒绝 | 见下方 M2-7 命令块；自动化承载：`pytest tests/integration -k concurrent_resume` | 并发两个 resume 请求，**恰一个 200、一个 409**——同一任务同时只允许一个活跃执行 |
++| M2-8 | 任务取消 | happy path：任务运行中 `curl -sf -X POST localhost:8000/tasks/<id>/cancel`；内部状态与事件断言：`pytest tests/integration -k cancel` | 停止派发新调用；pending 调用标记 failed(cancelled)；进行中调用标记 uncertain；任务终态 cancelled 且收到 final 事件；paused/pending 任务取消同样合法（ARCHITECTURE §5.1） |
++
++### M2-3b 命令块（Last-Event-ID 重连）
++
++```bash
++# 第一次连接，收到若干事件后 Ctrl-C 断开
++curl -sfN localhost:8000/tasks/<id>/events | tee /tmp/sse1.log
++MAX_SEQ=$(grep '^id:' /tmp/sse1.log | tail -1 | awk '{print $2}')
++# 携带 Last-Event-ID 重连
++curl -sfN -H "Last-Event-ID: ${MAX_SEQ}" localhost:8000/tasks/<id>/events | tee /tmp/sse2.log
++```
++
++> 判据：sse2.log 首个事件 `id:` == MAX_SEQ+1；两段拼接后 seq 连续、无丢失无重复。
++
++### M2-7 命令块（409 判定——注意不能带 `-f`）
++
++```bash
++curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8000/tasks/<id>/resume &
++curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8000/tasks/<id>/resume
++wait
++```
++
++> 判据：两行输出恰为 {200, 409} 各一。**不能带 `-f`**：409 时 curl 退出码 22，无法以退出码区分"预期 409"与"意外错误"，须以 `-w '%{http_code}'` 抓状态码判定。
+ 
+ ## M3 — 前端
+ 
+ | ID | 标准 | 验收命令 | 通过判据 |
+ |----|------|----------|----------|
+-| M3-1 | 端到端可视化 | 浏览器（或 Playwright 脚本）创建任务 | 时间线实时渲染 ≥ 2 个工具调用事件与最终结果 |
++| M3-1 | 端到端可视化 | 浏览器（或 Playwright 脚本——**Playwright 不在 §2.1 依赖白名单，引入前须 Architect 更新依赖清单；手动浏览器验收即满足**）创建任务 | 时间线实时渲染 ≥ 2 个工具调用事件与最终结果（以 `final` 事件判定流结束） |
+ | M3-2 | 无前端报错 | 浏览器 console | 0 error |
+ 
+ ## M4 — 端到端验收（项目级）
+ 
+ | ID | 标准 | 验收命令 | 通过判据 |
+ |----|------|----------|----------|
+-| E2E-1 | 真实 LLM 全链路 | `python examples/run_agent.py "用 http_request 获取 example.com 标题，calc 统计字符数，结果写入 report.txt"` | 三类工具均被真实调用；report.txt 内容合理 |
+-| E2E-2 | 轨迹可回放 | `python -m cli.replay <task_id>` | 完整事件序列与 DB 记录一致 |
+-| E2E-3 | 无 key 环境健壮 | `env -i PATH=$PATH pytest tests/e2e` | e2e skip 而非 error，其余全绿 |
+-| E2E-4 | G-1~G-5 全量门禁 | `bash scripts/check.sh` | 全部通过 |
++| E2E-1 | 真实 LLM 全链路 | `python examples/run_agent.py "用 http_request 获取 example.com 标题，calc 统计字符数，结果写入 report.txt"`（run_agent 自读 .env，见 M1-2 要点；事件统计同 M1-2 命令块的 jq 方式） | **tool_call 事件数 ≥ 3 且工具种类 = 3（http_request/calc/file_write 齐备）**；`data/report.txt` 内容与 http 响应实际内容及 calc 实际计算结果一致（QA 交叉校验）；**禁止以硬编码输出冒充**。前置条件：example.com 须在 `HTTP_ALLOWED_HOSTS` 默认白名单（M1 交付落实） |
++| E2E-2 | 轨迹可回放 | `python -m cli.replay <task_id>`（cli.replay 为 M2 可观测性交付物，见 ROADMAP） | 完整事件序列与 DB 记录一致（无 thought 事件；比对方式：replay 输出 vs TaskEvent 表查询） |
++| E2E-3 | 无 key 环境健壮 | 见下方 E2E-3 命令块 | e2e skip 而非 error（进程环境无 key 且绕开 .env，判据不失真），其余全绿 |
++| E2E-4 | G-1~G-5 全量门禁 | `bash scripts/check.sh` | check.sh 覆盖 **G-1 + G-2 + G-3 + G-4 + G-5a + G-5b 全部分项**，逐项独立执行、输出分项结果，分项全部通过；无 `\|\|` 兜底（QA 阅读 check.sh 源码确认） |
++
++### E2E-3 命令块（无 key 环境，绕开 .env）
++
++```bash
++env -i PATH="$PATH" HOME="$HOME" CALC_AGENT_ENV_FILE=/dev/null python -m pytest tests/e2e
++```
++
++> 要点：`env -i` 只清进程环境、不清 .env 文件——若 .env 含真实 key，e2e 不会 skip 而是真跑，判据失真；故须 `CALC_AGENT_ENV_FILE=/dev/null` 绕开 .env。保留 `HOME` 避免缓存/临时目录报错产生假阴性。
+ 
+ ## 验收报告模板
+ 
+ QA 在 `docs/handoff/qa-<里程碑>.md` 输出：每条 ID → 实际命令输出摘要 → 通过/失败 → 失败归因与退回对象。
++
++## 变更记录
++
++### v1.0 → v1.1
++
++1. G-5 拆分为 G-5a（pyright，退出码必须 0）与 G-5b（compileall，退出码必须 0），独立执行、独立判定，禁止 `||` 兜底（修复假阳性）。
++2. G-3 密钥扫描改为失败即阻断语义（grep 退出码 1=通过、0=阻断、2=阻断），移除 `|| echo CLEAN` 兜底；注明 M4 可选引入 gitleaks/detect-secrets。
++3. M0-2 不再允许 0 collected，必须至少收集并通过 1 个真实测试（/health 端点测试）；新增 M0-4 pyright 依赖就位检查。
++4. 新增 M1-1b：FakeLLM 集成测试必须在无真实 key 环境下运行通过。
++5. 强化 M1-2 / E2E-1：必须断言实际发生的工具调用，校验产出文件内容与实际计算结果一致，禁止硬编码输出冒充。
++6. 新增 M1-5 工具安全边界验收。
++7. 新增恢复语义验收：M2-3b（SSE Last-Event-ID 断线重连）、M2-5（uncertain 非幂等恢复置 paused 等待确认）、M2-6（uncertain 幂等自动重试一次）、M2-7（并发 resume 409 拒绝）、M2-8（cancel 语义）；M2-2/M2-3 判据细化。
++
++### v1.1 → v1.2（按架构复审 + QA 验收标准检查报告修订）
++
++1. **[P0-1]** G-2 命令改 `--cov-report=term-missing`，判据注明自 M1 起生效（M0 仅要求可运行）；pytest-cov 已补入 ARCHITECTURE §2.1 依赖白名单与 ROADMAP M0 安装清单。
++2. **[P0-2]** G-4 判据量化为"退出码 0 且无反向 import 输出"；`scripts/check_layers.py` 列入 ROADMAP M0 交付物（Backend 实现）；check.sh 内容清单补 G-4，与 E2E-4 口径一致。
++3. **[P0-3]** G-1 判据改为"check.sh 内部逐项独立执行并输出分项结果（聚合退出码 + 分项报告），分项全部通过"——失败可归因，不再以聚合退出码单独判定 pytest。
++4. **[P1] G-3**：命令改用 `rc=$?; [ "$rc" -eq 1 ]` 机器可判定形式（去掉 `; echo "exit=$?"`）；正则补 `sk-[a-z0-9_-]{8,}` 覆盖 `sk-proj-`/`sk-ant-` 前缀；补 check.sh 集成（set -e 注意）与 fixture 占位 key 豁免备注。
++5. **[P1] M0-1**：就绪等待循环 + 标志位收尾判定（防全失败时以 sleep 退出 0 的假阳性）+ body 精确匹配 + 进程清理。
++6. **[P1] M0-3 / M1-1b / E2E-3**：采用 `CALC_AGENT_ENV_FILE=/dev/null`（ARCHITECTURE §7 新定义）显式绕开 .env，与环境变量 unset 构成双通道清理；E2E-3 保留 `HOME` 防假阴性。
++7. **[P1] M1-2**：弃用 `export $(grep … | xargs)`，改 run_agent 自读 .env 且缺 key 显式报错；事件观测渠道明确为 `logs/agent-<task_id>.jsonl`（jq 统计，注明系统工具属性）；产出路径改为沙箱 `data/out.txt`。
++8. **[P1/P2] M2-3b / M2-5 / M2-6 / M2-7 / M2-8**：补可执行命令与 pytest 选择器（`-k sse_reconnect / uncertain_nonidempotent / uncertain_idempotent / concurrent_resume / cancel`）；M2-5 措辞去"自动 resume"（恢复为手动触发）；M2-7 用 `-w '%{http_code}'` 抓码判定（不带 `-f`，409 时 curl 退出 22 不可用）；M2-2/M2-4/M2-3 判据补自动化承载与机检建议。
++9. **[P1] E2E-1**：判据修正为"tool_call 事件数 ≥ 3 且工具种类 = 3"（消除 ≥2 与三类齐备的自相矛盾）；补事件观测渠道、`data/report.txt` 沙箱路径、example.com 白名单前置条件、key 加载方式统一（run_agent 自读 .env）；E2E-2 注明 cli.replay 归属 M2。
++10. M0-4 / G-5a 补 Node.js 运行时缺失判为依赖未就位；M3-1 Playwright 补依赖红线括注。
+diff --git a/docs/AGENT_ROLES.md b/docs/AGENT_ROLES.md
+index 5f9c275..ae92bfa 100644
+--- a/docs/AGENT_ROLES.md
++++ b/docs/AGENT_ROLES.md
+@@ -1,6 +1,6 @@
+ # CognitiveAgent Lab — Agent 角色定义（开发团队配置）
+ 
+-> 版本：v1.0 ｜ 依据：docs/ENVIRONMENT_AUDIT.md §3（子代理为会话内任务型实例）
++> 版本：v1.1（按评审意见修订：路径统一为 `src/` 前缀、事件表述去 thought 化） ｜ 依据：docs/ENVIRONMENT_AUDIT.md §3（子代理为会话内任务型实例）
+ >
+ > **实现方式**：WorkBuddy 原生支持派生命名子代理（真实能力，已验证）。四个角色以**任务型子代理**实例化：Lead Orchestrator（主会话）在任务列表中创建任务后，按角色派生子代理认领执行；子代理之间通过共享任务列表与交接文档（`docs/handoff/`）协作。子代理随任务结束回收，**不是常驻进程**。
+ 
+@@ -19,7 +19,7 @@
+               code-review / testing Skill 强制门禁
+ ```
+ 
+-- Backend / Frontend 依赖 Architect 产出的接口契约（`docs/ARCHITECTURE.md` + `models/` Pydantic schema）。
++- Backend / Frontend 依赖 Architect 产出的接口契约（`docs/ARCHITECTURE.md` + `src/models/` Pydantic schema）。
+ - QA 对 Backend / Frontend 的交付执行 `testing` 与 `code-review` Skill 门禁。
+ - 所有角色的任务经 Lead Orchestrator 派发，跨角色沟通走任务列表 + 交接文档。
+ 
+@@ -31,9 +31,9 @@
+ |------|------|
+ | **职责** | 技术架构设计、模块与接口规范（API 契约、Pydantic schema、状态机定义）、技术选型评估、架构一致性评审（调用 `architecture-review` Skill） |
+ | **工作边界** | 只产出设计文档与 schema 代码骨架；不实现业务逻辑；不修改 runtime 实现代码 |
+-| **可用工具与权限** | 读文件、写 `docs/` 与 `models/` 目录；可用 Explore 子代理做调研；禁止改动 `api/ services/ agent/ tools/ storage/` 的实现 |
++| **可用工具与权限** | 读文件、写 `docs/` 与 `src/models/` 目录；可用 Explore 子代理做调研；禁止改动 `src/api/ src/services/ src/agent/ src/tools/ src/storage/` 的实现 |
+ | **输入** | 用户需求、变更请求、其他角色提出的接口疑问（交接文档） |
+-| **输出** | 更新后的 `docs/ARCHITECTURE.md`（含版本号与变更记录）、`models/` schema 定义、ADR（架构决策记录，追加至 `docs/ARCHITECTURE.md` 附录） |
++| **输出** | 更新后的 `docs/ARCHITECTURE.md`（含版本号与变更记录）、`src/models/` schema 定义、ADR（架构决策记录，追加至 `docs/ARCHITECTURE.md` 附录） |
+ | **交付标准** | ① 每个接口有请求/响应 Pydantic 模型；② 状态机无非法迁移路径；③ 通过 architecture-review Skill 六项硬约束自检；④ 文档版本递增 |
+ | **依赖关系** | 上游：用户需求；下游：Backend、Frontend 等待其契约冻结后才开工 |
+ 
+@@ -42,9 +42,9 @@
+ | 维度 | 定义 |
+ |------|------|
+ | **职责** | Agent runtime 实现（主循环、planner、tool registry）、工具开发、任务状态持久化、FastAPI 端点（调用 `agent-development` Skill） |
+-| **工作边界** | 只实现 `api/ services/ agent/ tools/ storage/ models/`；不改前端；架构变更必须先提请 Architect（不许私自改契约） |
+-| **可用工具与权限** | 读写 `src/` 全部、运行 venv 内 pytest/pip、运行项目脚本；**禁止**：硬编码密钥、引入多 Agent 框架、写入 `docs/ARCHITECTURE.md`（只能提变更请求） |
+-| **输入** | Architect 冻结的契约（`docs/ARCHITECTURE.md` + `models/`）、QA 退回的缺陷清单 |
++| **工作边界** | 只实现 `src/api/ src/services/ src/agent/ src/tools/ src/storage/ src/models/`；不改前端；架构变更必须先提请 Architect（不许私自改契约） |
++| **可用工具与权限** | 读写 `src/` 全部、运行 venv 内 pytest/pip/pyright、运行项目脚本；**禁止**：硬编码密钥、引入多 Agent 框架、写入 `docs/ARCHITECTURE.md`（只能提变更请求） |
++| **输入** | Architect 冻结的契约（`docs/ARCHITECTURE.md` + `src/models/`）、QA 退回的缺陷清单 |
+ | **输出** | 可运行代码 + 单元测试 + 交接文档（`docs/handoff/backend-<任务名>.md`：改动文件清单、运行方式、已知限制） |
+ | **交付标准** | ① pytest 全绿；② 核心模块行覆盖 ≥ 80%；③ 通过 code-review Skill 门禁；④ 交接文档完整 |
+ | **依赖关系** | 上游：Architect 契约；下游：Frontend（API 可用后联调）、QA（交付后进入测试） |
+@@ -53,7 +53,7 @@
+ 
+ | 维度 | 定义 |
+ |------|------|
+-| **职责** | 交互界面与任务可视化：任务创建表单、执行轨迹时间线（thought/tool_call/result 事件流）、任务状态面板 |
++| **职责** | 交互界面与任务可视化：任务创建表单、执行轨迹时间线（公开事件流：`status/tool_call/tool_result/error/final`，以 `final` 判定流结束，支持 Last-Event-ID 断线重连）、任务状态面板 |
+ | **工作边界** | 只实现 `web/`（静态页面 + 原生 JS，SSE 拉取执行事件）；不改后端实现；需要新 API 时提请 Architect |
+ | **可用工具与权限** | 读写 `web/`、调用本地服务验证（curl/TestClient 对拍）；禁止改 `src/` 后端代码 |
+ | **输入** | Architect 的 API 契约、Backend 的交接文档 |
+@@ -65,8 +65,8 @@
+ 
+ | 维度 | 定义 |
+ |------|------|
+-| **职责** | 自动化测试编写与执行（调用 `testing` Skill）、错误处理审查、代码评审（调用 `code-review` Skill）、里程碑验收（对照 `docs/ACCEPTANCE_CRITERIA.md` 逐条执行验收命令） |
+-| **工作边界** | 写 `tests/`、执行验收命令、产出报告；**不改产品代码**（评审与修改职责分离，缺陷退回原角色修复） |
++| **职责** | 自动化测试编写与执行（调用 `testing` Skill）：按 `tests/unit/ tests/integration/ tests/e2e/` 分层组织、错误处理审查、代码评审（调用 `code-review` Skill）、里程碑验收（对照 `docs/ACCEPTANCE_CRITERIA.md` 逐条执行验收命令，G-5a/G-5b 等独立判定项禁止兜底） |
++| **工作边界** | 写 `tests/unit/ tests/integration/ tests/e2e/`、执行验收命令、产出报告；**不改产品代码**（评审与修改职责分离，缺陷退回原角色修复） |
+ | **可用工具与权限** | 读写 `tests/`、运行 pytest/coverage、读全部代码、写 `docs/handoff/qa-<任务名>.md`；禁止修改 `src/ web/` |
+ | **输入** | Backend/Frontend 交付与交接文档、里程碑验收指令 |
+ | **输出** | 测试报告（通过率、覆盖率、失败归因）、评审结论（通过/退回+必改项）、验收报告 |
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index dda43e2..a4ce388 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -1,7 +1,7 @@
+ # CognitiveAgent Lab — 技术架构
+ 
+-> 版本：v1.0（待用户批准） ｜ 状态：**草案 — 批准前不进行大规模编码**
+-> 决策记录（ADR）追加在文末附录。
++> 版本：v1.2 ｜ 状态：**已按评审意见修订**（v1.1 经架构复审 + QA 验收标准检查两轮独立复审，v1.2 修复其指出的 P0/Major 问题）
++> 决策记录（ADR）追加在文末附录；v1.0→v1.1、v1.1→v1.2 变更记录见文末。
+ 
+ ## 1. 系统目标
+ 
+@@ -19,62 +19,206 @@
+ | Agent 编排 | **自研单主循环**（约 300 行核心代码） | 满足"真实 runtime"且不引入多 Agent 框架（约束 3） |
+ | 状态存储 | SQLite（`sqlite3` + 文件库） | 零部署、可持久化、够用；预留 Postgres 迁移位 |
+ | 前端 | 原生 HTML/JS 单页（`web/`）+ SSE | 任务可视化够用即可，不引 React 构建链 |
+-| 可观测 | 结构化事件日志（DB 表 + JSONL 文件） | 每步可回放 |
++| 可观测 | 结构化事件日志（DB 表 + JSONL 文件） | 每步可回放、可重放续传 |
++
++### 2.1 运行时依赖与必要性（完整清单，除此之外不加依赖）
++
++| 依赖 | 必要性（一句话） |
++|------|------------------|
++| fastapi | Web 框架：任务 API 与 SSE 端点的路由、校验、OpenAPI 文档 |
++| uvicorn | ASGI 服务器：运行 FastAPI 应用（含 SSE 长连接） |
++| pydantic | 数据模型即契约：请求/响应/工具参数/事件负载的校验与序列化 |
++| pydantic-settings | 配置管理：从环境变量/.env 加载密钥与运行参数 |
++| pytest | 测试框架：unit/integration/e2e 分层测试体系 |
++| pytest-asyncio | 异步测试支持：运行 async 端点与 Agent 主循环测试 |
++| httpx | HTTP 客户端：TestClient 对拍 + `http_request` 工具实现 |
++| openai | LLM 接入：真实 tool-calling，支持自定义 `base_url` 切换兼容端点 |
++| pyright | 静态类型检查：G-5a 门禁，退出码 0 才可合入 |
++| pytest-cov | 覆盖率采集：G-2 门禁的 pytest 集成插件（`--cov` 参数提供方） |
++
++**依赖红线**：上表为全部允许依赖（pyright 与 pytest-cov 仅用于开发期检查与测试度量，置于 dev 分组）；引入任何新依赖必须先经 Architect 更新本表并递增版本号。
+ 
+ ## 3. 分层架构
+ 
+ ```
+-┌───────────────────────────────────────────────┐
+-│  web/            任务创建表单 · 执行轨迹时间线      │  Frontend Agent
+-├───────────────────────────────────────────────┤
+-│  src/api/        FastAPI 路由层                  │  只做校验与调度
+-│    POST /tasks          创建任务(goal)            │
+-│    GET  /tasks/{id}     任务状态+步骤+结果         │
+-│    GET  /tasks/{id}/events  SSE 执行事件流        │
+-│    POST /tasks/{id}/resume   恢复中断任务          │
+-├───────────────────────────────────────────────┤
+-│  src/services/   编排层                          │  事务边界
+-├───────────────────────────────────────────────┤
+-│  src/agent/      Agent 核心（真实 LLM 驱动）       │  Backend Agent
+-│    loop.py       主循环：plan → act → observe     │
+-│    llm.py        LLMClient(统一封装, env 配置)     │
+-│    registry.py   工具注册表(schema 自动生成)        │
+-├───────────────────────────────────────────────┤
+-│  src/tools/      工具实现（Pydantic 输入+executor）│
+-│    calc.py http_request.py file_write.py …      │
+-├───────────────────────────────────────────────┤
+-│  src/storage/    SQLite 持久化                    │
+-│  src/models/     共享 Pydantic schema             │
+-└───────────────────────────────────────────────┘
++┌───────────────────────────────────────────────────────────────┐
++│  web/            任务创建表单 · 执行轨迹时间线（公开事件流）        │  Frontend Agent
++├───────────────────────────────────────────────────────────────┤
++│  src/api/        FastAPI 路由层                                  │  只做校验与调度
++│    POST /tasks                    创建任务(goal)                 │
++│    GET  /tasks/{id}               任务状态+步骤+结果              │
++│    GET  /tasks/{id}/events        SSE 公开事件流（支持断线重连）    │
++│    POST /tasks/{id}/resume        恢复中断任务（受恢复锁约束）      │
++│    POST /tasks/{id}/cancel        取消任务                       │
++│    POST /tasks/{id}/tool-calls/{tool_call_id}/confirm           │
++│                                   uncertain 非幂等调用人工确认    │
++├───────────────────────────────────────────────────────────────┤
++│  src/services/   编排层（事务边界、checkpoint、恢复锁）            │
++├───────────────────────────────────────────────────────────────┤
++│  src/agent/      Agent 核心（真实 LLM 驱动）                      │  Backend Agent
++│    loop.py       主循环：plan → act → observe                   │
++│    llm.py        LLMClient(统一封装, env 配置)                   │
++│    registry.py   工具注册表(schema 自动生成 + 幂等/风险声明)       │
++├───────────────────────────────────────────────────────────────┤
++│  src/tools/      工具实现（Pydantic 输入+executor，安全规范见 §6） │
++│    calc.py http_request.py file_write.py …                     │
++├───────────────────────────────────────────────────────────────┤
++│  src/storage/    SQLite 持久化（含恢复锁/乐观并发版本号）          │
++│  src/models/     共享 Pydantic schema                           │
++└───────────────────────────────────────────────────────────────┘
+ ```
+ 
+ **依赖方向**（强制，code-review 门禁项）：`api → services → agent → tools/storage`，`models` 被所有层引用，禁止反向 import。
+ 
++### 3.1 SSE 端点（GET /tasks/{id}/events）
++
++- **公开事件类型**（收敛，完整枚举）：`status | tool_call | tool_result | error | final`。**不再存在 `thought` 事件**：模型内部推理不持久化到公开事件流（DB 事件表、JSONL、SSE 均不落 thought）。
++- **事件负载**：
++  - `tool_call`：`tool_call_id`、`tool_name`、参数摘要（截断长度上限，默认 512 字符）。
++  - `tool_result`：`tool_call_id`、成功/失败标志、结果摘要（截断长度上限，默认 512 字符）。
++  - `status`：任务状态变更（含迁移原因）。
++  - `error`：不可恢复/需注意的错误信息。
++  - `final`：任务终止时**必发一条**（含最终状态与结果摘要），客户端以此判定流结束。
++- **事件序号**：每任务 `seq` 单调递增（从 1 开始，由 storage 层在写入时原子分配）；SSE 消息的 `id:` 字段携带该 `seq`。
++- **断线重连**：端点支持 `Last-Event-ID` 请求头；重连后从该 `seq+1` 续传。事件**先落库（TaskEvent 表）再推送**，因此任意已持久化事件均可重放，不依赖内存缓冲。
++- 终态（completed/failed/cancelled）后端点发送 `final` 后正常关闭流；客户端重连到已终态任务时，服务端重放全部事件并以 `final` 结束。
++
+ ## 4. Agent 主循环设计（核心）
+ 
+ ```
+ 初始化: Task(goal) → LLM(系统提示+工具清单)
+ 循环 (≤ MAX_STEPS=25, 每步超时可配):
+-  1. LLM 返回: [thought] + [tool_call(s)] 或 final_answer
+-  2. registry 校验参数 → executor 执行工具 → 捕获异常
+-  3. 每个动作写 storage: TaskEvent(type, payload, ts)
++  1. LLM 返回 tool_call(s) 或 final_answer
++     （模型可能附带内部推理文本，但不写入任何公开事件/持久化事件流）
++  2. 为每个调用分配稳定 tool_call_id → 持久化 checkpoint
++     → registry 校验参数 → executor 执行工具 → 捕获异常
++  3. 每次状态变更写 TaskEvent(type ∈ {status, tool_call, tool_result, error}, seq)
+   4. tool 结果作为 tool message 回传 LLM
+-终止: final_answer | 达到步数上限 | 不可恢复错误 → Task.status = completed/failed
++终止: final_answer | 达到步数上限 | 不可恢复错误
++      → Task.status = completed/failed + 发送 final 事件（必发）
+ ```
+ 
+ - **真实 LLM**：工具选择由模型 tool-calling 决定，运行时无法预测下一步——这是与"静态规则模拟"的本质区别，e2e 测试断言行为不可硬编码。
+-- **状态持久化**：Task/Step/Event 三表，每次状态变更即写库；进程重启后 `resume` 从最后 checkpoint 续跑。
++- **状态持久化**：Task/Step/ToolCall/TaskEvent 四表，每次状态变更即写库；进程重启后 `resume` 按 §5.1 恢复语义从 checkpoint 续跑。
+ - **防护**：最大步数、单工具超时、工具异常不致命（错误回传 LLM 自纠）。
+ 
+ ## 5. 数据模型（关键表/模型）
+ 
+-- `Task`: id, goal, status(`pending|running|completed|failed|paused`), result, created_at, updated_at
+-- `Step`: id, task_id, seq, thought, tool_name, tool_args, status
+-- `TaskEvent`: id, task_id, seq, type(`thought|tool_call|tool_result|observation|error`), payload(JSON), ts
++- `Task`: id, goal, status(`pending|running|completed|failed|paused|cancelled`), result, version(乐观并发控制/执行 fencing token), created_at, updated_at
++- `Step`: id, task_id, seq(任务内步骤序号), tool_call_id（**无 thought 字段**——模型内部推理不采集，不持久化）
++- `ToolCall`: tool_call_id(稳定调用 ID), task_id, seq(任务级事件序号，与 TaskEvent.seq 同一序号空间，storage 写入时原子分配), tool_name, tool_args, status(`pending|running|succeeded|failed|uncertain`), result, error, idempotency(该调用**生效**幂等性的快照，见 §6.4), created_at, updated_at
++- `TaskEvent`: id, task_id, seq, type(`status|tool_call|tool_result|error|final`), payload(JSON), ts
++
++任务状态机合法迁移：
++
++```
++pending → running → (completed | failed | paused | cancelled)
++pending → cancelled                       （未启动任务直接取消）
++paused  → running                         （resume，受恢复锁约束，见 §5.1）
++paused  → cancelled                       （等待确认中的任务可取消，见 §5.1 cancel 语义）
++running → cancelled                       （见 §5.1 cancel 语义）
++```
++
++`completed / failed / cancelled` 为终态，不可再迁移。
++
++事件序号 `seq`：每任务独立、单调递增、写入时由 storage 原子分配；同一任务内事件先落库再推送（SSE `id:` 携带，支持 `Last-Event-ID` 重放）。
++
++### 5.1 任务恢复与幂等性
++
++**稳定调用 ID**：每次工具调用在派发前分配全局唯一的 `tool_call_id`（事件序号或 UUID，实现二选一、全程不变）。该 ID 是恢复、幂等判定、SSE 事件对齐与人工确认的唯一锚点。
++
++**工具调用状态机**：
++
++```
++pending → running → (succeeded | failed | uncertain)
++```
++
++- `succeeded/failed`：执行器正常返回（含工具自身的失败）。
++- `uncertain`：调用已发出但结果未知（如进程在执行中途被 kill、超时后无法确认是否已产生副作用）。
++
++**checkpoint 语义**：checkpoint = 某工具调用进入 `running` **之前**持久化的完整上下文（任务状态 + 已完成步骤 + 待执行调用及其 tool_call_id）。恢复时以最后 checkpoint 为起点重建循环上下文。
++
++**幂等性分级**：工具注册表必须为每个工具声明 `idempotency: idempotent | non-idempotent`（见 §6.4）。恢复策略按状态 + 幂等性矩阵执行：
++
++| 调用状态 | 幂等工具 | 非幂等工具 |
++|----------|----------|------------|
++| `succeeded` | 直接复用已存结果，**不重执行** | 直接复用已存结果，**不重执行** |
++| `failed` | 由 LLM 决定是否换参数重试（**新调用 ID**） | 由 LLM 决定是否换参数重试（**新调用 ID**） |
++| `uncertain` | **可自动重试一次**（原调用 ID 重新入 running，事件流携带同一 tool_call_id + attempt 序号，前端按最新一轮渲染；重试仍 uncertain 则置 paused） | **禁止自动重试**：任务置 `paused`，等待用户确认 |
++
++**恢复触发方式**：恢复为**手动触发**（`POST /tasks/{id}/resume`）；服务重启后**不自动扫描**中断任务。
++
++**人工确认 API**（uncertain 非幂等调用专用）：
++
++```
++POST /tasks/{id}/tool-calls/{tool_call_id}/confirm
++body: { "action": "retry" | "skip" }
++```
+ 
+-状态机合法迁移：`pending→running→(completed|failed|paused)`，`paused→running`。
++- `retry`：用户确认该调用未产生副作用（或副作用可接受），以**新调用 ID** 重新执行并记录确认人/时间。
++- `skip`：将该调用标记 `failed`（error="skipped-by-user"），结果回传 LLM 由其决定后续步骤。
++- 任务确认后由 `paused → running`，继续受恢复锁约束。
+ 
+-## 6. 配置与密钥
++**任务取消（cancel）**：
++
++```
++POST /tasks/{id}/cancel
++```
++
++- 语义：**停止派发新调用**；所有 `pending` 调用标记 `failed`（error="cancelled"）；**进行中的 `running` 调用标记 `uncertain`**（因为无法确认其是否已产生副作用）。
++- 适用状态：`running | paused | pending`。对 `paused`（等待 uncertain 确认中）与 `pending`（未启动）任务，cancel 同样合法——无 `running` 调用时直接进入终态；`pending` 调用同样标记 failed(cancelled)。
++- 取消后任务进入终态 `cancelled`，发送 `final` 事件（含状态与已完成部分的结果摘要）。
++- 对被标记 `uncertain` 的非幂等调用，结果摘要中明确提示"副作用未知，已取消"，便于用户后续人工处置。**声明**：`cancelled` 为终态，其中的 uncertain 调用不提供系统内继续执行路径（confirm API 仅服务 paused 任务）；处置仅指用户在系统外核查副作用。
++
++**并发恢复控制**：
++
++- 同一任务**同时只允许一个活跃执行**。
++- 实现方式：Task 行的 `version` 字段做乐观并发控制——resume 请求在事务内校验并递增 version；`POST /tasks/{id}/resume` 对已持有恢复锁（version 与请求方不一致 / 已有活跃执行心跳）的任务返回 `409 Conflict`，**拒绝双重恢复**。
++- 活跃执行须周期性心跳（更新 `updated_at`）；心跳过期的持有方可被新 resume 抢占（仍走 version 乐观锁，保证只有一个赢家）。
++- **fencing（防僵尸执行方）**：活跃执行持有其获取的 version 值作为**执行 token**；每次派发工具调用与每次状态写库都必须携带该 token 做条件更新（`UPDATE … WHERE id=? AND version=?`，CAS 语义）。写库影响行数为 0 即检测到已被抢占（version 已被新持有方递增），旧执行方**立即自行终止派发并不再写库**（自杀）——即便心跳延迟导致其被误判死亡，也无法再产生双活跃执行的副作用。
++
++**测试要求**：以上恢复语义的验收项见 `docs/ACCEPTANCE_CRITERIA.md` M2（M2-5/M2-6/M2-7）。
++
++## 6. 工具安全规范
++
++### 6.1 calc — 安全表达式计算
++
++- 基于 **AST 的安全表达式解析**（Python `ast` 模块）：只允许白名单节点——数字常量、二元运算（`+ - * / % **`）、一元运算（`+ -`）、白名单函数调用（`abs / min / max / round / sqrt` 等）。
++- **禁止** `eval` / `exec` / 名称解析（Name 节点一律拒绝，函数名只匹配白名单 Call）。
++- 限制表达式长度（默认 ≤ 256 字符）与运算深度（AST 深度默认 ≤ 32）。
++
++### 6.2 http_request — SSRF 防护
++
++- 协议：仅允许 `http` / `https`。
++- **域名白名单**（可通过配置项扩展，默认含示例域名）。
++- **IP 校验**：DNS 解析后对实际 IP 做校验，阻断私有/内网/保留地址：
++  - IPv4：`127.0.0.0/8`、`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`，及云元数据地址 `169.254.169.254`。
++  - IPv6：`::1`、`fc00::/7`、`fe80::/10`。
++- **resolve-then-connect（防 DNS rebinding TOCTOU）**：校验通过后**必须绑定该已校验 IP 直接建连**（HTTP `Host` 头保留原域名），**禁止连接时对域名二次解析**——否则攻击者可在校验与连接两次解析之间切换 DNS 应答绕过上述阻断。
++- **重定向**：禁止自动跟随未校验的重定向——每一跳都重新走"域名白名单 + IP 校验"全流程，校验不过即阻断；最大跳数上限（默认 3）。
++- 超时上限与响应大小上限（默认 10s / 1MB，超限截断并标记）。
++- 幂等性声明：**non-idempotent**（其中 GET 请求视为幂等，注册表以方法参数区分）。
++
++### 6.3 file_write — 沙箱写入
++
++- 写入范围限制在 workspace 的 **`data/` 沙箱目录**内。
++- 路径处理：**先规范化（`realpath`）再校验前缀**——规范化结果必须以沙箱根目录前缀开头，否则拒绝；显式拒绝含 `..` 的路径穿越。
++- **拒绝符号链接**：写入前用 `lstat` 检查目标路径**各级目录**不含符号链接，发现即拒绝。
++- 文件大小上限（默认 1MB）。
++- 幂等性声明：**non-idempotent**。
++
++### 6.4 工具注册表新增字段
++
++`src/agent/registry.py` 的注册声明在原有（name、description、Pydantic 参数 schema）基础上**必须**包含：
++
++| 字段 | 取值 | 说明 |
++|------|------|------|
++| `idempotency` | `idempotent \| non-idempotent` | 恢复语义判定依据（§5.1），缺失即注册失败 |
++| `risk_level` | `low \| medium \| high` | 安全审计与 code-review 关注分级（如 file_write/http_request 为 medium 及以上） |
++
++**调用级有效幂等性**：恢复判定（§5.1 矩阵）采用**调用级有效幂等性** = 工具注册表的默认声明，可按参数规则覆写——如 `http_request` 默认声明 non-idempotent，但方法为 GET 时覆写为 idempotent。派发调用时把生效值快照写入 `ToolCall.idempotency` 字段，恢复时以该快照为准（不重新计算）。
++
++## 7. 配置与密钥
+ 
+ `.env`（gitignore）→ `pydantic-settings` 读取：
+ 
+@@ -83,14 +227,20 @@ OPENAI_API_KEY=…          # 或 ANTHROPIC_API_KEY
+ LLM_BASE_URL=…            # 可选，兼容端点
+ LLM_MODEL=gpt-4o          # 默认模型
+ CALC_AGENT_MAX_STEPS=25
++CALC_AGENT_ENV_FILE=.env  # pydantic-settings 的 env_file 路径覆盖（默认 .env）
++HTTP_ALLOWED_HOSTS=…      # http_request 域名白名单（逗号分隔，默认含 example.com）
++DATA_SANDBOX_DIR=data/    # file_write 沙箱根
+ ```
+ 
++**`CALC_AGENT_ENV_FILE` 语义**：pydantic-settings 的 env_file 路径从该变量读取（默认 `.env`）。**设为 `/dev/null` 即完全绕开 .env 文件**——用于无 key 环境验收（M0-3/M1-1b/E2E-3）与测试 fixture，无需移动/删除真实 `.env`（环境变量仍优先于 env_file，二者双通道清理后才构成有效"无 key"判据）。
++
+ **红线**：任何密钥出现在代码/测试/日志中即 code-review Blocker。
+ 
+-## 7. 可观测性
++## 8. 可观测性
+ 
+-- 每步产出结构化 `TaskEvent`（DB）+ 同步 JSONL 追加（`logs/agent-<task_id>.jsonl`）。
+-- SSE 端点实时推送事件给前端时间线。
++- 每次状态变更产出结构化 `TaskEvent`（DB，类型 ∈ `status|tool_call|tool_result|error|final`，见 §3.1）+ 同步 JSONL 追加（`logs/agent-<task_id>.jsonl`，含 seq）。**thought 不落任何观测通道。**
++- SSE 端点实时推送公开事件给前端时间线；`id:` 携带 seq，`Last-Event-ID` 支持断线续传（事件先落库再推送，可重放）。
++- 任务终止必发 `final` 事件（最终状态 + 结果摘要），客户端以 `final` 判定流结束。
+ - 回放命令：`python -m cli.replay <task_id>` 按时间序打印完整轨迹。
+ 
+ ## 附录：ADR
+@@ -98,3 +248,28 @@ CALC_AGENT_MAX_STEPS=25
+ - **ADR-001 采用自研单循环而非框架**：需求（拆解/工具/状态/日志）均为单 Agent 语义，LangGraph 等引入的图编排与多 Agent 抽象是纯开销，违背约束 3。
+ - **ADR-002 openai SDK 优先**：自定义 `base_url` 覆盖国内外多数兼容端点；LLMClient 抽象隔离供应商，换 anthropic 只动一个文件。
+ - **ADR-003 SQLite 起步**：单文件、零部署；存储层走 repository 模式，迁移 Postgres 只换实现。
++- **ADR-004 断点恢复与幂等性语义**（v1.1，v1.2 修订）：为每次工具调用定义稳定 `tool_call_id` 与 `pending→running→(succeeded|failed|uncertain)` 状态机；checkpoint 在调用进入 running 前持久化完整上下文；恢复策略按"状态 × 幂等性"矩阵执行——succeeded 复用、failed 由 LLM 换参重试（新调用 ID）、uncertain 幂等工具可自动重试一次（同 ID + attempt 序号）、uncertain 非幂等工具禁止自动重试并置 paused 等待用户确认（confirm API）；cancel 停止派发并将进行中调用标记 uncertain（paused/pending 任务亦可取消）；同一任务同时只允许一个活跃执行（version 乐观并发控制，双重恢复返回 409）。**v1.2 补 fencing**：活跃执行持有 version 值作为执行 token，派发与写库均为携带 token 的 CAS 条件更新，写库零行命中即被抢占、旧执行方自行终止——即便心跳延迟导致误判死亡，也不会出现双活跃执行副作用。该语义是"安全恢复"与"危险重放"的分界线，宁可暂停等人，不可静默重复副作用。
++- **ADR-005 工具安全边界**（v1.1，v1.2 修订）：calc 走 AST 白名单节点解析，禁 eval/exec/名称解析，限表达式长度与运算深度；http_request 仅 http/https + 域名白名单 + DNS 解析后 IP 私有/保留段阻断（含 169.254.169.254 云元数据）+ **resolve-then-connect（校验通过的 IP 直接建连，禁止二次解析，防 DNS rebinding TOCTOU）** + 重定向逐跳重新校验 + 超时与响应大小上限；file_write 限定 data/ 沙箱、realpath 后前缀校验、拒绝 `..` 与各级目录符号链接、文件大小上限；注册表强制声明 `idempotency`（调用级有效幂等性 = 默认声明可按参数覆写，如 GET 覆写）与 `risk_level`。Agent 可自主执行不可信输入衍生的调用，安全边界必须在工具执行器内强制，而非依赖 LLM 自觉。
++- **ADR-006 公开事件模型（去 thought 化）**（v1.1）：公开事件类型收敛为 `status | tool_call | tool_result | error | final`；模型内部推理不持久化到任何公开通道（DB 事件表/JSONL/SSE）。理由：① thought 属于模型内部中间产物，暴露既无稳定契约价值也有内容风险；② 收敛后的事件类型可被前端与测试精确断言；③ tool_call/tool_result 以 `tool_call_id` 对齐、负载带截断上限，保证流的可解析与可重放。SSE `id:` 携带每任务单调递增 seq，`Last-Event-ID` 断线从 seq+1 续传（事件先落库再推送，可重放）；final 事件任务终止必发，作为客户端判定流结束的唯一信号。
++
++## 变更记录
++
++### v1.0 → v1.1（按评审意见修订，修复 4 项关键 + 3 项次要）
++
++1. **断点恢复安全语义**（评审关键问题 1）：§5 数据模型新增 `ToolCall` 表与稳定 `tool_call_id`、调用状态机（含 `uncertain`）；新增 §5.1"任务恢复与幂等性"（checkpoint 语义、按幂等性分级的恢复策略矩阵、uncertain 非幂等工具禁止自动重试并置 paused 等待用户确认、confirm API、cancel 语义、并发恢复控制/乐观锁、M2 测试要求指向）。
++2. **工具安全边界**（评审关键问题 2）：新增 §6"工具安全规范"——calc AST 白名单、http_request SSRF 防护（IP 黑名单段、重定向逐跳校验）、file_write 沙箱与符号链接拒绝；§6.4 注册表新增 `idempotency`/`risk_level` 字段；§3 registry 描述同步。
++3. **事件模型去 thought 化 + SSE 机制**（评审关键问题 3）：§3.1 SSE 端点公开事件类型收敛为 `status|tool_call|tool_result|error|final`；`Step.thought` 从数据模型删除（标注不采集）；tool_call/tool_result 负载定义（tool_call_id + 截断摘要）；seq 单调递增、`id:` 携带、`Last-Event-ID` 续传、事件先落库再推送；final 必发；§4 主循环与 §8 可观测性同步修正。
++4. **运行时依赖清单**（评审次要问题 3）：§2.1 新增"运行时依赖与必要性"表格（fastapi/uvicorn/pydantic/pydantic-settings/pytest/pytest-asyncio/httpx/openai/pyright），声明除此之外不加依赖。
++5. API 端点清单新增 `POST /tasks/{id}/cancel` 与 `POST /tasks/{id}/tool-calls/{tool_call_id}/confirm`；任务状态机新增 `cancelled` 终态。
++6. 新增 ADR-004 / ADR-005 / ADR-006。
++7. 技术栈、其余章节随上述变更做一致性同步（无选型变更）。
++
++### v1.1 → v1.2（按架构复审 + QA 验收标准检查两轮报告修订）
++
++1. **[P0-1]** §2.1 依赖白名单增补 `pytest-cov`（G-2 覆盖率门禁的 pytest 集成插件，dev 分组），消除 G-2 命令与依赖红线矛盾。
++2. **[M-3]** §6.2 补 resolve-then-connect：校验通过的 IP 直接用于建连（Host 头保留原域名），禁止二次解析，闭合 DNS rebinding TOCTOU 缺口；ADR-005 同步修订。
++3. **[M-4]** §5.1 并发恢复控制补 fencing：活跃执行持有 version 值作为执行 token，派发/写库均走 CAS 条件更新，零行命中即被抢占、自行终止；ADR-004 同步修订。
++4. **[M-5]** §5 任务状态机补 `paused → cancelled`（等待确认中可取消）与 `pending → cancelled`（未启动任务直接取消）；cancel 语义节明确适用状态与 cancelled 终态下 uncertain 调用无系统内继续执行路径的声明。
++5. **[P1-6 联动]** §7 新增 `CALC_AGENT_ENV_FILE` 配置（env_file 路径覆盖，`/dev/null` 即绕开 .env），为无 key 验收命令（M0-3/M1-1b/E2E-3）提供双通道清理的文档依据；`HTTP_ALLOWED_HOSTS` 注明默认含 example.com（E2E-1 前置）。
++6. **[Minor]** §6.4 补"调用级有效幂等性"规则（默认声明可按参数覆写，ToolCall.idempotency 为生效值快照）；§5.1 uncertain 幂等重试补"同 tool_call_id + attempt 序号，前端按最新一轮渲染"；明确恢复为手动触发（重启不自动扫描）；§5 补 Step.seq / ToolCall.seq 字段语义说明。
++7. 版本号 v1.1 → v1.2，本变更记录追加。
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index 7ebb719..b4f895f 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -1,42 +1,57 @@
+ # CognitiveAgent Lab — 开发路线图
+ 
+-> 版本：v1.0 ｜ 前置条件：`docs/ARCHITECTURE.md` 获用户批准后启动 M0
+-> 节奏：每个里程碑结束由 QA 按 ACCEPTANCE_CRITERIA 执行可验收命令，通过才进入下一个。
++> 版本：v1.2（按架构复审 + QA 验收标准检查两轮报告修订） ｜ 前置条件：`docs/ARCHITECTURE.md`（v1.2）获用户批准后启动 M0
++> 节奏：每个里程碑结束由 QA 按 ACCEPTANCE_CRITERIA（v1.2）执行可验收命令，通过才进入下一个。
+ 
+ ## M0 — 项目脚手架（半天）
+ 
+-- 建立 `src/ tests/ web/ docs/handoff/` 目录结构与空 `__init__`。
+-- venv 安装依赖：`fastapi uvicorn pydantic pydantic-settings pytest pytest-asyncio httpx openai`。
+-- `pyproject.toml` + `.env.example` + `.gitignore`（含 `.env`、`logs/`、`*.db`）+ git 初始化。
+-- CI 脚本 `scripts/check.sh`：`pytest + 覆盖率` 一键运行。
+-- **验收**：`pytest` 空跑通过；`uvicorn` 能起服务返回 health check。
++- 建立 `src/ tests/ web/ docs/handoff/` 目录结构与空 `__init__`（tests 下分 `tests/unit/ tests/integration/ tests/e2e/`）。
++- venv 安装依赖（与 ARCHITECTURE.md §2.1 一致，除此之外不加）：`fastapi uvicorn pydantic pydantic-settings pytest pytest-asyncio httpx openai pyright pytest-cov`（后两项为 dev 分组）。
++- `pyproject.toml` + `.env.example`（含 `CALC_AGENT_ENV_FILE`，见 ARCHITECTURE §7）+ `.gitignore`（含 `.env`、`logs/`、`*.db`）+ git 初始化。
++- `/health` 端点 + 对应 pytest 测试（满足 M0-2 "≥ 1 collected"）。
++- **`scripts/check_layers.py`（Backend 实现，Architect 提供校验规则）**：分层依赖检查——校验 `api→services→agent→tools/storage` 单向、`src/models/` 仅被引用，禁止反向 import（G-4 门禁依据）。
++- CI 脚本 `scripts/check.sh`：**G-1 + G-2 + G-3 + G-4 + G-5a + G-5b 全量**，各子项**逐项独立执行、显式 `if` 判定退出码（不依赖 `set -e` 链）、输出分项报告**，聚合退出码 = 任一分项失败即非 0——与 E2E-4 口径一致，失败可归因。
++- **验收**：M0-1 ~ M0-4 + G-4（`python -m scripts.check_layers` 退出码 0，M0 即生效）。
+ 
+-## M1 — Agent 核心循环（2-3 天）｜ Backend + Architect
++## M1 — Agent 核心循环 + 工具安全（2-3 天）｜ Backend + Architect
+ 
+-- `agent/llm.py`：LLMClient（env 配置、超时、重试）。
+-- `agent/registry.py`：工具注册（Pydantic → JSON schema 自动生成）。
+-- `agent/loop.py`：主循环（plan→act→observe、步数上限、异常捕获）。
+-- 首批 3 个工具：`calc`（安全表达式计算）、`http_request`（GET 限定白名单域）、`file_write`（沙箱目录内写文件）。
+-- 集成测试：FakeLLM 注入预设 tool-call 序列驱动循环。
+-- **验收**：FakeLLM 集成测试全绿；真实 key 下 `examples/run_agent.py` 完成多步任务并打印轨迹。
++- `src/agent/llm.py`：LLMClient（env 配置、超时、重试；支持 `CALC_AGENT_ENV_FILE` 路径覆盖）。
++- `src/agent/registry.py`：工具注册（Pydantic → JSON schema 自动生成）+ **强制声明 `idempotency` 与 `risk_level` 字段**（缺失即注册失败）+ 调用级有效幂等性覆写规则（ARCHITECTURE §6.4）。
++- `src/agent/loop.py`：主循环（plan→act→observe、步数上限、异常捕获；分配稳定 `tool_call_id`；内部推理不落事件流）。
++- 首批 3 个工具（含**安全实现**，规范见 ARCHITECTURE.md §6）：
++  - `calc`：AST 白名单节点解析（禁 eval/exec/名称解析），限表达式长度与运算深度；幂等声明 idempotent。
++  - `http_request`：仅 http/https、域名白名单（**默认白名单含 example.com**，E2E-1 前置）、DNS 解析后 IP 私有/保留段阻断（含 169.254.169.254）、**resolve-then-connect（校验通过的 IP 直接建连，禁二次解析）**、重定向逐跳重新校验、超时与响应大小上限；幂等声明 non-idempotent（GET 覆写为 idempotent）。
++  - `file_write`：`data/` 沙箱、realpath 后前缀校验、拒绝 `..` 与各级目录符号链接、文件大小上限；幂等声明 non-idempotent。
++- `examples/run_agent.py`（**M1 交付物**）：命令行入口——经 pydantic-settings 自读 .env（缺 key 显式报错退出非 0，不得静默通过）、启动时打印 task_id、产出文件落 `data/` 沙箱。
++- 集成测试：FakeLLM 注入预设 tool-call 序列驱动循环；**必须覆盖无 key 环境**（`env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY CALC_AGENT_ENV_FILE=/dev/null pytest tests/integration`）。
++- 单元测试：工具安全攻击用例（表达式注入、SSRF 私有 IP/云元数据/重定向绕过/DNS rebinding fake resolver、路径穿越/符号链接）。
++- **验收**：M1-1 / M1-1b / M1-2 / M1-3 / M1-4 / M1-5（见 ACCEPTANCE_CRITERIA v1.2）。
+ 
+-## M2 — 持久化 + API（2 天）｜ Backend，QA 同步写测试
++## M2 — 持久化 + API + 恢复语义（2-3 天）｜ Backend，QA 同步写测试
+ 
+-- `storage/`：Task/Step/TaskEvent 三表 + repository。
+-- 任务中断/恢复：`POST /tasks/{id}/resume`。
+-- `api/`：任务 CRUD + SSE 事件流端点。
+-- **验收**：杀进程重启后 resume 续跑；SSE 能实时收到事件；API 集成测试全绿。
++- `src/storage/`：Task/Step/ToolCall/TaskEvent 四表 + repository；Task.version 乐观并发控制。
++- **恢复语义实现（实现于 `src/services/` 编排层——事务边界、checkpoint、恢复锁归属该层，勿散落 api/agent 层以免 G-4 违规）**，规范见 ARCHITECTURE.md §5.1：
++  - checkpoint：工具调用进入 running 前持久化完整上下文（任务状态 + 已完成步骤 + 待执行调用）。
++  - 恢复策略矩阵：succeeded 复用不重执行；failed 由 LLM 决定换参重试（新调用 ID）；uncertain 幂等工具自动重试一次（同 ID + attempt 序号）；**uncertain 非幂等工具禁止自动重试 → 任务置 paused**。
++  - 确认 API：`POST /tasks/{id}/tool-calls/{tool_call_id}/confirm`（retry / skip）。
++  - cancel API：`POST /tasks/{id}/cancel`（适用 running/paused/pending；停止派发，进行中调用标记 uncertain，终态 cancelled——含 `paused→cancelled`、`pending→cancelled` 迁移）。
++  - 恢复锁 + **fencing**：同一任务同时只允许一个活跃执行，并发 resume 返回 409；活跃执行持有 version 执行 token，派发/写库走 CAS 条件更新，被抢占即自行终止。
++- `src/api/`：任务 CRUD + SSE 事件流端点（公开事件 `status|tool_call|tool_result|error|final`；`id:` 携带每任务单调递增 seq；`Last-Event-ID` 断线续传，事件先落库再推送；final 必发）。
++- `cli.replay` 回放命令（**M2 可观测性交付物**，E2E-2 依赖）：`python -m cli.replay <task_id>` 按时间序打印完整轨迹。
++- 测试：M2-2 ~ M2-8（含 kill -9 中断恢复、uncertain 非幂等置 paused、并发 resume 409、SSE 重连、cancel 含 paused/pending 取消路径）。
++- **验收**：M2-1 ~ M2-8（见 ACCEPTANCE_CRITERIA v1.2）。
+ 
+ ## M3 — 前端可视化（1-2 天）｜ Frontend
+ 
+-- 任务创建表单、任务列表、执行轨迹时间线（SSE 驱动）、状态面板。
+-- **验收**：浏览器创建任务并看到实时轨迹与最终结果；无 console 报错。
++- 任务创建表单、任务列表、执行轨迹时间线（SSE 驱动公开事件流 `status|tool_call|tool_result|error|final`，以 `final` 判定流结束，支持 Last-Event-ID 断线重连）、状态面板。
++- **验收**：浏览器创建任务并看到实时轨迹与最终结果；无 console 报错（手动浏览器验收即满足；Playwright 引入前须 Architect 更新依赖清单）。
+ 
+ ## M4 — 端到端与加固（1-2 天）｜ QA 主导
+ 
+-- e2e 测试（真实 LLM，无 key 自动 skip）；错误注入测试（工具失败、LLM 超时）。
+-- 覆盖率达标（核心模块 ≥ 80%）；`scripts/check.sh` 全绿。
+-- **验收**：ACCEPTANCE_CRITERIA 全清单逐条通过，产出验收报告。
++- e2e 测试（真实 LLM，无 key 自动 skip——用 `CALC_AGENT_ENV_FILE=/dev/null` 绕开 .env）；错误注入测试（工具失败、LLM 超时、进程中断、恢复抢占 fencing）。
++- 覆盖率达标（核心模块 ≥ 80%，G-2 自 M1 生效）；`scripts/check.sh` 全绿（G-1~G-4 + G-5a/G-5b 分项独立判定）。
++- 可选增强：引入 `gitleaks` 或 `detect-secrets` 密钥扫描（引入前须 Architect 更新依赖清单）。
++- **验收**：ACCEPTANCE_CRITERIA v1.2 全清单逐条通过，产出验收报告。
+ 
+ ## 里程碑外的持续机制
+ 
+@@ -47,3 +62,24 @@
+ ## 明确不做（Scope 外）
+ 
+ - 多 Agent 协作框架、RAG、接入 R 代码/认知模型/实验数据、重构既有游戏项目、用户认证体系。
++
++## 变更记录
++
++### v1.0 → v1.1
++
++1. M0：依赖清单补 `pyright`（G-5a 门禁）；补 `/health` 测试（M0-2 ≥ 1 collected）；check.sh 补独立 G-3/G-5a/G-5b 判定。
++2. M1：标题改为"Agent 核心循环 + 工具安全"；补三工具安全实现任务（calc AST 白名单、http_request SSRF 防护、file_write 沙箱）与注册表幂等/风险字段；补无 key 集成测试与工具安全攻击用例。
++3. M2：标题改为"持久化 + API + 恢复语义"；补恢复语义实现（checkpoint、恢复策略矩阵、confirm/cancel API、恢复锁/乐观并发）；SSE 补 seq/Last-Event-ID/final 语义与测试。
++4. 路径表述统一为 `src/` 前缀（src/agent/、src/storage/、src/api/ 等）与 `tests/unit|integration|e2e`。
++
++### v1.1 → v1.2（按架构复审 + QA 验收标准检查报告修订）
++
++1. **[P0-1]** M0 安装清单补 `pytest-cov`（dev 分组，G-2 门禁依据），与 ARCHITECTURE §2.1 白名单同步。
++2. **[P0-2]** M0 交付物补 `scripts/check_layers.py`（Backend 实现、Architect 提供规则）；check.sh 定义改为 **G-1~G-4 + G-5a/G-5b 全量**、逐项独立执行 + 分项报告（显式 if 判定，不依赖 set -e 链），与 E2E-4 口径一致；M0 验收补 G-4。
++3. **[P0-3 联动]** check.sh 分项输出要求使 G-1 失败可归因（聚合退出码 + 分项报告）。
++4. **[M-3]** M1 http_request 任务补 resolve-then-connect（校验通过的 IP 直接建连，防 DNS rebinding TOCTOU）；攻击用例补 fake resolver rebinding 用例。
++5. **[M-4]** M2 恢复锁任务补 fencing（version 执行 token + CAS 条件更新 + 被抢占自行终止）；M4 错误注入补"恢复抢占 fencing"场景。
++6. **[M-5]** M2 cancel 任务补适用状态（running/paused/pending，含 `paused→cancelled`、`pending→cancelled` 迁移）。
++7. **[P1-6 联动]** M0 `.env.example` 含 `CALC_AGENT_ENV_FILE`；M1 无 key 测试命令与 LLMClient 改用 `CALC_AGENT_ENV_FILE=/dev/null` 绕开 .env。
++8. **[P1-7 联动]** M1 交付物补 `examples/run_agent.py`（自读 .env、缺 key 显式报错、打印 task_id、产出落 data/ 沙箱）；http_request 默认白名单注明含 example.com（E2E-1 前置）。
++9. **[Minor]** M2 恢复语义实现明确归属 `src/services/` 编排层；`cli.replay` 明确为 M2 可观测性交付物；uncertain 幂等重试补"同 ID + attempt 序号"。
