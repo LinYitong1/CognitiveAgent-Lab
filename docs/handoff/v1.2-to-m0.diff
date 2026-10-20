@@ -245,7 +245,7 @@ index 0000000..640e1bc
 +
 +## 5. 风险与建议
 +
-+1. **[建议·非阻断] `scripts/check.sh:13` 硬编码本机 managed node 绝对路径**（`/Users/linyitong/.workbuddy/binaries/node/versions/22.22.2-6/bin`）。在无此路径的机器上该 PATH 前缀失效（不致失败，但 node 兜底失效，pyright 可能因缺 node 不可用）。建议 M1 由 Backend 改为条件检测（存在才 export，或用 `command -v node` 判定后回退）。
++1. **[建议·非阻断] `scripts/check.sh:13` 硬编码本机 managed node 绝对路径**（`~/.workbuddy/binaries/node/versions/22.22.2-6/bin`）。在无此路径的机器上该 PATH 前缀失效（不致失败，但 node 兜底失效，pyright 可能因缺 node 不可用）。建议 M1 由 Backend 改为条件检测（存在才 export，或用 `command -v node` 判定后回退）。
 +2. **[移交 Lead] 项目根残留 tempfile 垃圾文件**：Backend 交接文档已知问题 2 所列 8 字符随机名文件 + `.coverage.*` 中间文件，且**本次 QA 会话实测又新增若干同类残留**（每条命令的 sitecustomize tempfile 探测产生）。Lead 提交前务必清理，且**禁止 `git add -A` / `git add .`**（.gitignore 未覆盖无后缀随机名文件，会被误入库）——按 Backend 建议 `git add` 显式路径清单。
 +3. **[无风险确认] M1 前置已就位**：`CALC_AGENT_ENV_FILE` 语义（config.py:14）、`allowed_hosts` 白名单解析（config.py:34-37）、pyright venv 配置均已按契约落地，M1 可直接开工。
 +4. **[口径说明] 本报告所有 PASS(等效)/ENV-BLOCKED 分类**均附原文命令失败输出作环境归因证据，未以等效通过掩盖原文失败；最终判定以用户本地运行 §4 清单结果为准。
@@ -338,7 +338,7 @@ index 0000000..32ed7e4
 +
 +# pyright 需要 Node.js 运行时：优先用 pip 包自带的 nodejs-bin，
 +# 缺失时回退到 managed node（确保 G-5a 不会因 PATH 缺 node 而失败）
-+export PATH="/Users/linyitong/.workbuddy/binaries/node/versions/22.22.2-6/bin:$PATH"
++export PATH="~/.workbuddy/binaries/node/versions/22.22.2-6/bin:$PATH"
 +
 +overall=0
 +

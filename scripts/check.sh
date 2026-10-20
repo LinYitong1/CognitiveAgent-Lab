@@ -8,9 +8,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 PY="$ROOT/.venv/bin/python"
 
-# pyright 需要 Node.js 运行时：优先用 pip 包自带的 nodejs-bin，
-# 缺失时回退到 managed node（确保 G-5a 不会因 PATH 缺 node 而失败）
-export PATH="/Users/linyitong/.workbuddy/binaries/node/versions/22.22.2-6/bin:$PATH"
+# pyright 需要 Node.js 运行时：优先用 pip 包自带的 nodejs-bin；
+# PATH 中无 node 时提示（不硬编码任何机器特定路径）
+if ! command -v node >/dev/null 2>&1; then
+  echo "[warn] node not found in PATH; pyright (G-5a) may fail. Install Node.js or the nodejs-bin pip package."
+fi
 
 overall=0
 

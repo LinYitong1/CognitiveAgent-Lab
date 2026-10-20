@@ -1,7 +1,7 @@
 [project]
 name = "cognitive-agent-lab"
 version = "0.1.0"
-description = "CognitiveAgent Lab — AI Agent runtime with task state persistence and observable event streams"
+description = "CognitiveAgent Lab — deterministic experiment-to-game pipeline on an AI Agent runtime (ExperimentSpec -> trials -> GameSpec -> single-file playable HTML)"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi",
@@ -11,6 +11,14 @@ dependencies = [
     "httpx",
     "openai",
 ]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# src/ 本身是顶层包（import 路径为 src.xxx，为冻结 M1/Phase A 代码零改动而保留）
+[tool.setuptools.packages.find]
+include = ["src*"]
 
 [dependency-groups]
 dev = [

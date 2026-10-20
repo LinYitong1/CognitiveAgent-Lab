@@ -23,3 +23,6 @@ __pycache__/
 
 # WorkBuddy 会话数据（项目记忆，不入库）
 .workbuddy/
+
+# pip 构建产物（pip install -e . 生成）
+*.egg-info/
