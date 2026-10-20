@@ -19,12 +19,12 @@
 ### G-3 command block (the whole block's exit code is the verdict)
 
 ```bash
-grep -rniE "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
+grep -rniI -E "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
 rc=$?
 [ "$rc" -eq 1 ]
 ```
 
-> The regex contains `sk-[a-z0-9_-]{8,}` (covering the `sk-proj-…` / `sk-ant-…` prefix shapes). Semantics: grep rc=1 (no match) → pass; rc=0 (a match) or rc=2 (a scan error) → blocked. When integrating into check.sh, the exit code must be judged with an explicit `if`; a `set -e` chain cannot be relied on (grep rc=1 is the pass state and would abort a `set -e` script). Placeholder keys in test fixtures must use obviously non-real shapes (e.g. `test-key-not-real`) to avoid false positives from this scan.
+> The regex contains `sk-[a-z0-9_-]{8,}` (covering the `sk-proj-…` / `sk-ant-…` prefix shapes). `-I` skips binary files — the scan targets source text; compiled `.pyc` artifacts can false-positive when marshal reference bytes land adjacent to ASCII strings (observed with pytest's assertion-rewrite bytecode). Semantics: grep rc=1 (no match) → pass; rc=0 (a match) or rc=2 (a scan error) → blocked. When integrating into check.sh, the exit code must be judged with an explicit `if`; a `set -e` chain cannot be relied on (grep rc=1 is the pass state and would abort a `set -e` script). Placeholder keys in test fixtures must use obviously non-real shapes (e.g. `test-key-not-real`) to avoid false positives from this scan.
 
 ## M0 — Scaffolding
 

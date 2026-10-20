@@ -36,7 +36,10 @@ if [ $? -eq 0 ]; then report pass "G-2 coverage command runs"; else report fail 
 
 echo
 echo "===== G-3 secret scan (grep rc=1 passes; rc=0/2 blocks) ====="
-grep -rniE "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
+# -I skips binary files: compiled .pyc artifacts can false-positive when marshal
+# reference bytes land adjacent to ASCII strings (e.g. "task-expa002" + ref byte).
+# The scan targets source text only.
+grep -rniI -E "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
 g3_rc=$?
 if [ "$g3_rc" -eq 1 ]; then
   report pass "G-3 no hardcoded secrets"

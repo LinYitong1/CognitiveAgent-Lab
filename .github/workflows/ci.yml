@@ -38,7 +38,9 @@ jobs:
 
       - name: G-3 Secret scan (grep rc=1 passes)
         run: |
-          grep -rniE "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
+          # -I skips binary files (compiled .pyc artifacts can false-positive
+          # when marshal reference bytes land adjacent to ASCII strings).
+          grep -rniI -E "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
           rc=$?
           if [ "$rc" -eq 1 ]; then
             echo "G-3 PASS: no hardcoded secrets"
