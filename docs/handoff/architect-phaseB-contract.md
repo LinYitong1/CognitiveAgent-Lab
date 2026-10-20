@@ -184,4 +184,63 @@ TRIAL: FIXATION(timing.fixation_ms) → STIMULUS(timing.stimulus_ms|null=直至�
 3. **GB-8 内省豁免（草案内部不一致修正，如实报告）**：§1 D-1 禁止名集合含 `seed`，但 §2 `ExperimentRef.seed` 是 v2.1 已冻结的**引用复制字段**（只读指针，非实验逻辑所有权）。修正：GB-8 的禁止名交集检查**排除 ExperimentRef 子树**（其全部字段均为引用）；其余字段树与禁止名集合交集必须为空。此为 B0 草案自纠，不涉及 Phase A 契约。
 4. **GB-6 警告场景明确**：采用 `PARTIAL_OPTION_COVERAGE`（choice 响应的键位绑定未覆盖全部 options——合法但可能有选项不可达）。
 
+## §10 B1：validate_game 工具与 FakeLLM 工作流（冻结）
+
+实现位置：`src/tools/game_tools.py` + `src/agent/game_registry.py`（均纯新增，零修改 M1/Phase A/B0）。
+
+**输入模型**：
+
+```python
+class ValidateGameInput(BaseModel):
+    game_config: dict[str, object]        # GameSpec JSON 对象（LLM 直接内联生成）
+    bundle_path: str = Field(min_length=1)  # 相对 data/ 沙箱根的 ExperimentBundle JSON 路径
+    previous_errors: list[str] = Field(default_factory=list)  # error_code:path 指纹（防死循环，同 Phase A §5.4）
+```
+
+**ToolSpec 声明（冻结；description 纯 ASCII——R2 教训前置）**：
+
+```
+name="validate_game", idempotency="idempotent", risk_level="low"
+description:
+"Validate GameSpec JSON (presentation layer) against an ExperimentBundle already
+exported in data/ sandbox. game_config must be the GameSpec object itself, no
+wrapper. Top keys: schema_version(=1),game{name,version},experiment_ref{name,
+version,seed,config_fingerprint,trials_fingerprint,bundle_sha256},scene{title,
+instructions,layout,theme,assets},input{modalities,bindings[{response_name,keys}]},
+feedback{on_response,duration_ms},flow{ready_screen,block_breaks,end_screen},
+gamification{score,progress_bar,streak_bonus}. Copy experiment_ref values exactly
+from the bundle file. bundle_path is the bundle file path inside data/ sandbox."
+```
+
+**执行流程（冻结）**：
+1. 工具级护栏（→ `ok=False`，`BLOCKED:` 前缀）：
+   a. `game_config` 非 dict → `BLOCKED: game_config must be a JSON object`；
+   b. 序列化体积 > 256KB（复用 B0 `MAX_GAME_SPEC_BYTES`）→ `BLOCKED: game config too large`；
+   c. `bundle_path` 沙箱路径校验失败 → `BLOCKED: <原因>`（复用 `_sandbox_io.validate_sandbox_path` 第 1~3 步，只读用途）；
+   d. bundle 文件不存在 / JSON 解析失败 / 顶层非 dict → `BLOCKED: bundle not loadable ...`；
+2. 领域级（→ `ok=True`）：调用 B0 `validate_game(game_config, bundle)`（**规则不重复实现**）；
+3. stalled 判定：当次 errors 的 `error_code:path` 指纹，任一在 `previous_errors` 出现 ≥2 次 → `stalled: true` 且 errors 追加 `ITERATION_STALLED`（suggestion 同 Phase A："停止重复提交，总结未解决冲突并请用户裁决"）；
+4. 输出（`ToolResult(ok=True, result=<紧凑 JSON>)`）：
+
+```json
+{"valid": false, "stalled": false, "game_config_fingerprint": "<64hex 或 null>",
+ "errors": [{"error_code": "...", "path": "...", "message": "...", "suggestion": "..."}],
+ "warnings": [...]}
+```
+
+**组合器**：`build_game_registry(settings) -> ToolRegistry` = 实验三工具（validate_experiment / generate_trials / export_experiment）+ validate_game（复制 `build_experiment_registry` 组合模式；`build_registry` 零改动）。
+
+**边界（冻结）**：
+- validate_game 对 data/ 沙箱**只读**（唯一写动作是 None——不写任何文件）；
+- ExperimentBundle 在任何路径下都不可被游戏工具修改（集成测试断言前后 sha256 不变）；
+- 不实现 design_game/render_game（B2+）；不接真实 LLM。
+
+**B1 验收（QA 以此验收）**：
+- BT-1 工具级：非 dict / 超大 / 路径逃逸 / bundle 缺失 / bundle 损坏 → 全部 `ok=False` BLOCKED；
+- BT-2 领域级：G1~G6 错误经工具路径返回结构化报告（`ok=True` + `valid:false`），错误码与 B0 单测一致；
+- BT-3 stalled：同一错误指纹第 3 次提交 → `stalled:true` + `ITERATION_STALLED`；
+- BT-4 FakeLLM 全流程（集成）：export_experiment（写 bundle）→ validate_game（错 ref）→ 收到结构化报告 → validate_game（修正 + previous_errors）→ `valid:true` → final 文本；断言事件序列、bundle 文件前后逐字节不变；
+- BT-5 FakeLLM description 进 tools schema；纯 ASCII；组合器注册 4 工具；
+- BT-6 全量回归（171+ 新增全绿）、pyright 0、分层 PASS。
+
 —— 契约草案即止。等待用户审核；批准后 B0 实施 `game_schemas.py` + `validate_game`（校验函数，非工具）+ GB 测试。
