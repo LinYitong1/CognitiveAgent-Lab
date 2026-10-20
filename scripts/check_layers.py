@@ -23,6 +23,8 @@ SRC_ROOT = PROJECT_ROOT / "src"
 
 # Business layers: higher number = lower layer (the depended-on side); only higher → lower is allowed
 LAYER_ORDER: dict[str, int] = {
+    "cli": -1,      # installed entry point (user-approved CLI/API plan): above every business layer
+    "pipeline": -1,  # public Python API facade: composes agent + experiment layers
     "api": 0,
     "services": 1,
     "agent": 2,

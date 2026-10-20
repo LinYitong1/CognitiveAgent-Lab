@@ -2,6 +2,8 @@
 name = "cognitive-agent-lab"
 version = "0.1.0"
 description = "CognitiveAgent Lab — deterministic experiment-to-game pipeline on an AI Agent runtime (ExperimentSpec -> trials -> GameSpec -> single-file playable HTML)"
+readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi",
@@ -12,8 +14,11 @@ dependencies = [
     "openai",
 ]
 
+[project.scripts]
+cognitive-agent = "src.cli:main"
+
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 # src/ itself is the top-level package (import path is src.xxx, kept for zero changes to frozen M1/Phase A code)

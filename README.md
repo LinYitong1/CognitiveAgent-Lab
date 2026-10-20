@@ -48,53 +48,131 @@ Natural-language task (researcher prompt)
 python3.13 -m venv .venv
 .venv/bin/pip install -e .
 
-# 2. End-to-end demo: a scripted fake LLM drives the full agent workflow
-#    (no network, no keys). A single AgentLoop calls validate_experiment
-#    → generate_trials → export_experiment → validate_game → render_game
-#    and produces a playable HTML file.
-.venv/bin/python examples/run_game_agent.py
+# 2. Deterministic demo (scripted fake LLM — no network, no keys):
+#    the full agent workflow validate_experiment → generate_trials
+#    → export_experiment → validate_game → render_game → playable HTML,
+#    verified bundle + byte-identical HTML.
+cognitive-agent demo
 
-# 3. Open it in a browser (file://)
+# 3. Open the game in a browser (file://)
 open data/games/demo-agent-game.html        # macOS
 # Browser playtest checklist: docs/checklists/browser-playtest-checklist.md
 
 # 4. Independently verify the experiment bundle (generator-free; recomputes both fingerprints)
-.venv/bin/python -m src.experiment.verify data/experiments/demo-agent-game.json
+cognitive-agent verify data/experiments/demo-agent-game.json
 ```
-
-Other examples:
-
-```bash
-.venv/bin/python examples/run_game_render.py      # pure-function game generation, no agent
-.venv/bin/python examples/run_experiment_agent.py # Phase A: the three experiment tools workflow
-.venv/bin/python examples/run_agent.py            # M1: the three basic tools (requires a real LLM)
-```
-
-Connecting a real LLM (optional; needed by `examples/run_agent*.py`): copy `.env.example`
-to `.env` and fill in `OPENAI_API_KEY` or any OpenAI-compatible endpoint
-(`LLM_BASE_URL` + `LLM_MODEL`). The B3 demo above reads no keys at all.
 
 ## Installation
 
 | Item | Details |
 |---|---|
 | Python | >= 3.13 |
-| Install | `.venv/bin/pip install -e .` |
-| Dependencies | FastAPI, Pydantic v2, pydantic-settings, httpx, openai SDK (see pyproject.toml) |
-| Keys | Optional, only for `examples/run_agent*.py`; the pipeline and tests need zero keys |
+| From a clone | `python3.13 -m venv .venv && .venv/bin/pip install -e .` |
+| From git | `pip install "cognitive-agent-lab @ git+https://github.com/<org>/cognitive-agent-lab.git"` (URL once published) |
+| Console script | `cognitive-agent` (installed on PATH by `pip install`) |
+| Dependencies | FastAPI, Pydantic v2, pydantic-settings, httpx, openai SDK — nothing else (see pyproject.toml) |
+| Keys | Optional; `demo` and the whole test suite need zero keys |
+
+## Configuration
+
+Copy `.env.example` to `.env` and configure your provider (plain environment
+variables work too — pydantic-settings reads both):
+
+```bash
+cp .env.example .env
+
+# OpenAI or any authenticated OpenAI-compatible provider:
+OPENAI_API_KEY=sk-...
+LLM_MODEL=gpt-4o          # or the provider's model name
+
+# Keyless local OpenAI-compatible endpoint (e.g. Ollama):
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=qwen2.5:7b      # any model served by your endpoint
+# OPENAI_API_KEY can stay empty — a documented placeholder key is used
+# automatically for keyless local endpoints. If your endpoint requires
+# authentication, set OPENAI_API_KEY as well.
+```
+
+## CLI usage
+
+```bash
+# Deterministic scripted demo — no network, no keys, fully verified
+cognitive-agent demo
+
+# Same demo, all generated files confined to a directory of your choice
+cognitive-agent demo --output out/my-first-experiment
+
+# Run a natural-language task with your configured real LLM provider
+# (experimental: real-LLM end-to-end reliability is not yet validated —
+#  see "Validated capabilities vs limitations" above)
+cognitive-agent run "design a 2x2 attention experiment with 80 trials and render a playable game"
+
+# Confine the run's generated files to a directory
+cognitive-agent run "design an experiment" --output out/run1
+
+# Independently verify an ExperimentBundle (recomputes both SHA-256 fingerprints)
+cognitive-agent verify out/run1/experiments/my-experiment.json
+```
+
+Exit codes: `run`/`demo` → 0 success / 1 failure; `run` additionally → 2 when
+no credentials are configured. All generated experiment artifacts stay inside
+the output directory (default `data/`); agent event logs are runtime logs and
+land in `logs/`.
+
+## Python API
+
+```python
+import asyncio
+from src.pipeline import run_task, run_demo, PipelineResult
+
+# 1) Real provider (credentials resolved from .env / environment per the
+#    documented policy; raises MissingCredentialsError when nothing is set)
+result = asyncio.run(run_task(
+    "design a 2x2 experiment with 60 trials and render a playable game",
+))
+
+# 2) Deterministic demo (scripted client; no network, no keys)
+result = asyncio.run(run_demo(output_dir="out/demo"))
+
+# 3) Structured result (wraps the unchanged AgentResult contract)
+result.status                 # "completed" | "failed"
+result.result                  # the full AgentResult: status, result text, steps, events
+result.artifacts               # tuple[Path, ...] — files created during the run
+result.bundle_verification     # VerifyReport | None — independent bundle check
+result.html_verified           # bool | None — byte-identity vs deterministic re-render (demo)
+```
+
+Any `LLMClientProtocol` implementation can be injected as `client=` (that is
+how the test suite drives the same loop deterministically with FakeLLM).
+
+Other examples (repo clone only):
+
+```bash
+.venv/bin/python examples/run_game_render.py      # pure-function game generation, no agent
+.venv/bin/python examples/run_experiment_agent.py # Phase A: the three experiment tools workflow
+.venv/bin/python examples/run_agent.py            # M1: the three basic tools (requires a real LLM)
+.venv/bin/python examples/run_game_agent.py       # B3 end-to-end demo (same flow as `cognitive-agent demo`)
+```
+
+**Real-LLM reliability caveat**: `cognitive-agent run` and `run_task` with a
+real provider are experimental — real-LLM end-to-end reliability is **not yet
+validated** (known issue PA-14, see "Validated capabilities vs limitations").
+`cognitive-agent demo` / `run_demo` are the deterministic, fully verified paths.
 
 ## Architecture
 
 ```
 src/
-├── agent/        AgentLoop (plan→act→observe single loop), ToolRegistry, registry combinators
-├── tools/        Tool layer: calc / http_request / file_write (the three M1 tools)
-│                 + validate_experiment / generate_trials / export_experiment (Phase A)
-│                 + validate_game / render_game (Phase B)
-├── experiment/   Deterministic experiment engine: schemas / validation / generation / export /
-│                 verify (generator-free independent verification CLI) / game_schemas / game_render
-├── models/       Pydantic models (LLM, tool specs, events, results)
-└── api/          FastAPI + SSE event stream (M1)
+├── cli.py         cognitive-agent CLI entry point (run / demo / verify)
+├── pipeline.py    Public Python API facade (run_task / run_demo / PipelineResult)
+├── agent/         AgentLoop (plan→act→observe single loop), ToolRegistry, registry combinators
+├── tools/         Tool layer: calc / http_request / file_write (the three M1 tools)
+│                  + validate_experiment / generate_trials / export_experiment (Phase A)
+│                  + validate_game / render_game (Phase B)
+├── experiment/    Deterministic experiment engine: schemas / validation / generation / export /
+│                  verify (generator-free independent verification CLI) / game_schemas / game_render
+├── models/        Pydantic models (LLM, tool specs, events, results)
+└── api/           FastAPI + SSE event stream (M1)
 ```
 
 **Four anti-tamper defenses** (the game layer cannot change experiment conditions/trials/correctness):
