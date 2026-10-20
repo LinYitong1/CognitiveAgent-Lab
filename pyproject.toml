@@ -23,6 +23,12 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "loop: M1-1 agent loop integration tests",
+    "max_steps: M1-4 step limit tests",
+    "tool_failure: M1-3 tool failure resilience tests",
+    "tool_security: M1-5 tool security boundary tests",
+]
 
 [tool.pyright]
 # 显式指定解释器环境，保证 `pyright src/` 解析到 .venv 的依赖

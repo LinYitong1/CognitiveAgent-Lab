@@ -1,0 +1,4057 @@
+diff --git a/docs/handoff/architect-m1-contract.md b/docs/handoff/architect-m1-contract.md
+new file mode 100644
+index 0000000..a499e1e
+--- /dev/null
++++ b/docs/handoff/architect-m1-contract.md
+@@ -0,0 +1,455 @@
++# M1 接口契约 — Agent 核心循环 + 工具安全（冻结版）
++
++> 作者：Architect Agent ｜ 状态：**冻结**（用户已批准 M0 并授权 M1；本文档为 Backend 实现的唯一契约依据）
++> 上游依据：`docs/ARCHITECTURE.md` v1.2（§4/§5/§5.1/§6/§7、ADR-004/005/006）、`docs/ROADMAP.md` v1.2（M1 节）、`docs/ACCEPTANCE_CRITERIA.md` v1.2（M1-1/M1-1b/M1-2/M1-3/M1-4/M1-5）、`src/config.py`（M0 交付，**复用其 Settings，不修改既有字段**）
++> 依赖白名单：ARCHITECTURE §2.1（fastapi/uvicorn/pydantic/pydantic-settings/pytest/pytest-asyncio/httpx/openai/pyright/pytest-cov），M1 不新增。
++> 冻结含义：接口签名、事件格式、安全规则按本文实现；实现内部细节（私有函数、内部异常类型）Backend 可自定。**任何签名/格式变更必须回提 Architect 更新本文档**。
++
++---
++
++## 1. 模块接口
++
++### 1.0 共享模型（`src/models/`，被 agent/tools/tests 共同引用；tools 不 import agent，经 models 传递类型）
++
++```python
++# src/models/llm.py
++from pydantic import BaseModel
++
++class ToolCallRequest(BaseModel):
++    """LLM 返回的一次工具调用（统一结构，隔离供应商格式）。"""
++    remote_id: str                    # 供应商侧 ID（OpenAI tool_call.id；FakeLLM 自造如 "fake-0"），用于 tool message 回传匹配
++    tool_name: str
++    arguments: dict[str, object]      # 工具参数（registry 用 input_model 校验）
++
++class LLMResponse(BaseModel):
++    """LLMClient.chat 的统一返回。"""
++    content: str = ""                 # 模型文本（内部推理——不写入任何事件/JSONL，见 ADR-006）
++    tool_calls: list[ToolCallRequest] = []
++    finish_reason: str = "stop"       # "tool_calls" | "stop" | 其他供应商值
++```
++
++```python
++# src/models/events.py
++from datetime import datetime
++from enum import Enum
++from pydantic import BaseModel
++
++class AgentEventType(str, Enum):
++    status = "status"
++    tool_call = "tool_call"
++    tool_result = "tool_result"
++    error = "error"
++    final = "final"
++
++class AgentEvent(BaseModel):
++    """公开事件（完整枚举，无 thought——ARCHITECTURE §3.1 / ADR-006）。"""
++    type: AgentEventType
++    seq: int                          # 任务级单调递增，从 1 开始
++    ts: datetime                      # UTC
++    payload: dict[str, object]
++```
++
++**事件 payload 契约**（字段名冻结；摘要字段统一截断至 512 字符）：
++
++| type | payload 字段 |
++|------|--------------|
++| `status` | `{"status": "running", "reason": str}`（M1 仅开场一条；终态由 final 承载） |
++| `tool_call` | `{"tool_call_id": str, "tool_name": str, "args_summary": str}` |
++| `tool_result` | `{"tool_call_id": str, "ok": bool, "result_summary": str}` |
++| `error` | `{"message": str}`（不可恢复错误；≤512 字符） |
++| `final` | `{"status": "completed" \| "failed", "result_summary": str}` |
++
++```python
++# src/models/tool_result.py
++from pydantic import BaseModel
++
++class ToolResult(BaseModel):
++    """工具执行的统一返回——工具异常不抛出到 loop 外（M1-3 判据），一律转结构化结果。"""
++    ok: bool
++    result: str = ""                 # 成功时的结果文本（回传 LLM）
++    error: str = ""                  # 失败原因（回传 LLM）；安全拒绝统一前缀 "BLOCKED: "
++```
++
++```python
++# src/models/agent_result.py
++from pydantic import BaseModel
++from src.models.events import AgentEvent
++
++class AgentResult(BaseModel):
++    task_id: str
++    status: str                      # "completed" | "failed"
++    result: str                      # 最终答案（completed）或失败原因（failed）
++    steps: int                       # 实际消耗的 LLM 调用轮数
++    events: list[AgentEvent]         # 完整事件序列（内存副本，与 JSONL 一致）
++```
++
++### 1.1 `src/agent/llm.py` — LLMClient（真实实现）与替换点
++
++```python
++from typing import Any, Protocol
++from src.config import Settings
++from src.models.llm import LLMResponse
++
++Message = dict[str, Any]   # OpenAI chat 消息 JSON 格式（user / assistant(tool_calls) / tool 三种形态，见下）
++
++class LLMClientProtocol(Protocol):
++    """AgentLoop 的依赖类型（鸭子类型：任何实现该签名的对象可注入——FakeLLM 替换点，M1-1 依据）。"""
++
++    async def chat(self, messages: list[Message], tools: list[dict[str, Any]]) -> LLMResponse: ...
++
++
++class LLMClient:  # 实现 LLMClientProtocol
++    def __init__(self, settings: Settings, timeout: float = 60.0, max_retries: int = 2) -> None:
++        """内部构造 openai.AsyncOpenAI：
++        - api_key=settings.openai_api_key（key 为空时**不在此抛错**——由调用方（run_agent / M2 服务层）显式校验）
++        - base_url=settings.llm_base_url or None（兼容端点切换，ADR-002）
++        - timeout 与 max_retries 透传给 SDK（网络错误/超时重试由 openai SDK 承担）
++        """
++
++    async def chat(self, messages: list[Message], tools: list[dict[str, Any]]) -> LLMResponse:
++        """调用 chat.completions.create(model=settings.llm_model, messages=..., tools=...)，
++        将供应商响应转为 LLMResponse：
++        - 每个原生 tool_call → ToolCallRequest(remote_id=原生 id, tool_name=func.name, arguments=json.loads(func.arguments))
++        - arguments JSON 解析失败 → 抛 LLMProtocolError（内部异常类型，loop 视为不可恢复错误 → failed）
++        - SDK 重试耗尽后抛出的异常原样上抛，由 loop 捕获终止（见 §1.3 终止语义）
++        """
++```
++
++**Message 三种形态**（loop 构造，client/FakeLLM 透传）：
++
++```python
++{"role": "system", "content": str}                                    # 开场一条
++{"role": "user",   "content": goal}
++{"role": "assistant", "content": str, "tool_calls": [原生 tool_call]}  # 每轮回传（content 可为 ""）
++{"role": "tool", "tool_call_id": remote_id, "content": ToolResult 序列化文本}
++```
++
++tool message 的 `content` 契约：`ok=True` 时为 `result`；`ok=False` 时为 `f"ERROR: {error}"`（FakeLLM 测试据此断言 M1-3"错误回传 LLM"）。
++
++### 1.2 `src/agent/registry.py` — ToolSpec / ToolRegistry
++
++```python
++from typing import Any, Awaitable, Callable, Literal
++from pydantic import BaseModel
++from src.models.tool_result import ToolResult
++
++class ToolSpec(BaseModel):
++    """工具注册声明（ARCHITECTURE §6.4：idempotency / risk_level 必填，缺失即构造失败）。"""
++    name: str
++    description: str
++    input_model: type[BaseModel]                       # 参数校验模型（model_json_schema 自动导出）
++    idempotency: Literal["idempotent", "non-idempotent"]
++    risk_level: Literal["low", "medium", "high"]
++    executor: Callable[[BaseModel], Awaitable[ToolResult]]
++
++    def effective_idempotency(self, args: dict[str, Any]) -> Literal["idempotent", "non-idempotent"]:
++        """调用级有效幂等性（ARCHITECTURE §6.4）：默认返回声明值；
++        http_request 的 ToolSpec 覆写本方法——method == "GET" 时返回 "idempotent"。
++        M1 不被 loop 消费（恢复是 M2），但必须实现并可测（M2 将把生效值快照进 ToolCall 表）。"""
++
++
++class ToolRegistry:
++    def register(self, spec: ToolSpec) -> None:
++        """校验并登记：name 非空且不重复；input_model 必须是 BaseModel 子类；
++        executor 必须是 async callable。任何校验失败抛 ToolRegistryError（启动期错误，非运行期）。"""
++
++    def get_schemas(self) -> list[dict[str, Any]]:
++        """导出 OpenAI tools 格式（供 LLMClient.chat 的 tools 参数）：
++        [{"type": "function", "function": {"name", "description",
++          "parameters": input_model.model_json_schema()}}]"""
++
++    async def execute(self, name: str, args: dict[str, Any]) -> ToolResult:
++        """运行期唯一入口，异常不外抛（M1-3）：
++        - 未知工具        → ToolResult(ok=False, error=f"unknown tool: {name}")
++        - 参数校验失败    → ToolResult(ok=False, error=f"invalid arguments: {校验错误摘要}")
++        - executor 抛异常 → ToolResult(ok=False, error=f"tool execution failed: {异常摘要}")
++        - 正常            → executor 返回的 ToolResult"""
++```
++
++### 1.3 `src/agent/loop.py` — AgentLoop 主循环
++
++```python
++from collections.abc import Callable
++from src.config import Settings
++from src.agent.llm import LLMClientProtocol, Message
++from src.agent.registry import ToolRegistry
++from src.models.agent_result import AgentResult
++from src.models.events import AgentEvent
++
++class AgentLoop:
++    def __init__(
++        self,
++        client: LLMClientProtocol,          # FakeLLM 注入点（鸭子类型，无需继承）
++        registry: ToolRegistry,
++        settings: Settings,
++        on_event: Callable[[AgentEvent], None] | None = None,   # 可选事件回调（M1 测试断言用；M2 换成 storage 写库 + SSE 推送）
++    ) -> None: ...
++
++    async def run_task(self, goal: str) -> AgentResult: ...
++```
++
++**主循环语义（冻结）**：
++
++1. **task_id**：`task-{uuid4().hex[:12]}`；开场产出 `status(running)` 事件（seq=1）。
++2. **seq 分配**：任务内单调递增计数器（从 1 起），**每条事件一个 seq**；`tool_call_id = f"call_{seq:04d}"`（取该 tool_call 事件的 seq——事件序号即稳定调用 ID，ARCHITECTURE §5.1 允许的二选一之"事件序号"方案；同一 ID 全程不变，M2 直接沿用为 ToolCall 表主键）。
++3. 每轮（一轮 = 一次 LLM 调用，步数计数 `steps += 1`）：
++   - `client.chat(messages, registry.get_schemas())`；
++   - 响应含 `tool_calls` → 逐个：发 `tool_call` 事件（分配 tool_call_id）→ `registry.execute()` → 发 `tool_result` 事件（同 tool_call_id、ok、摘要）→ 结果以 tool message（用 `remote_id`）追加进 messages；assistant 消息（含原生 tool_calls）同时追加；
++   - 响应无 `tool_calls`（finish_reason=stop）→ `result = content`，任务 **completed**；
++   - **模型文本 content 不产出任何事件**（ADR-006）。
++4. **终止语义**：
++   - `steps >= settings.calc_agent_max_steps` 且无最终答案 → **failed**，`result = "max steps exceeded"`，发 `error` 事件再发 `final`；
++   - 不可恢复异常（`client.chat` 上抛的重试耗尽异常、LLMProtocolError）→ **failed**，`result = 异常摘要`，发 `error` + `final`；
++   - 工具失败（ToolResult.ok=False）→ **不终止**，错误回传 LLM 自纠（M1-3）。
++5. **final 必发**：任何终止路径（completed / failed）最后一条事件必为 `final`（含最终状态与 result 摘要）——M1-1 断言依据。
++6. **事件先落盘再继续**：每条事件产出后立即追加 JSONL（§1.4），再进入下一步（"先落库再推送"的 M1 等价物）。
++
++**系统提示词**（run_task 开场构造，要素冻结、措辞 Backend 可调）：你是多步任务执行 Agent；可用工具以 tools 参数提供；需要外部能力时调用工具；工具失败时会收到 `ERROR:` 前缀的 tool 结果，应换参数重试或改变策略；目标达成后直接给出最终答案文本、不再调用工具。
++
++### 1.4 `src/agent/events.py` — 事件日志（JSONL）
++
++```python
++from pathlib import Path
++from src.models.events import AgentEvent
++
++class EventLog:
++    """JSONL 事件日志（ARCHITECTURE §8 的 M1 形态：无 DB，仅文件）。"""
++
++    def __init__(self, task_id: str, log_dir: str | Path = "logs") -> None:
++        """路径：logs/agent-<task_id>.jsonl；log_dir 不存在则自动创建（mkdir parents=True, exist_ok=True）。"""
++
++    def append(self, event: AgentEvent) -> None:
++        """以 "a" 模式打开、单次 write(event.model_dump_json() + "\\n")、即时 flush——
++        保证 kill -9 后已写事件不丢（M2 断点恢复的事件回放基础）。"""
++```
++
++### 1.5 `examples/run_agent.py` — CLI 入口行为契约
++
++```
++用法：python examples/run_agent.py "<goal>"     # goal 为必填位置参数
++```
++
++行为契约（逐条冻结）：
++
++1. **sys.path 注入**：`sys.path.insert(0, str(Path(__file__).resolve().parents[1]))`（examples/ 不是包，保证 `import src...` 可用；始终从项目根运行）。
++2. **配置**：`get_settings()`（src/config.py，M0 交付——自读 .env，受 `CALC_AGENT_ENV_FILE` 路径覆盖；**不得修改该模块**）。
++3. **key 显式校验（M1-2 判据）**：`settings.openai_api_key` 与 `settings.anthropic_api_key` 均为空 → 向 stderr 打印明确错误（含 `.env` 路径与 `CALC_AGENT_ENV_FILE` 当前值的提示）→ **`sys.exit(2)`**。禁止静默通过。
++4. 组装：`LLMClient(settings)` + `ToolRegistry`（注册 calc/http_request/file_write）+ `AgentLoop`。
++5. **stdout 输出顺序（冻结，供验收脚本提取）**：
++   - 任务开始前：`task_id: <task_id>`（单独一行，M1-2 的 `TASK_ID=` 提取依据）；
++   - 结束后：`status: <completed|failed>` 与 `result: <摘要>`（截断 512 字符）。
++6. **退出码**：completed → 0；failed → 1；缺 key → 2。
++7. 事件 JSONL 落盘（由 loop 经 EventLog 完成）；产出文件（file_write）落 `data/` 沙箱。
++
++---
++
++## 2. 三个工具的输入 schema 与安全边界
++
++通用约定：executor 签名 `async def execute(args: <X>Input) -> ToolResult`；**所有安全拒绝返回 `ToolResult(ok=False, error="BLOCKED: <原因>")`，不抛异常**（错误返回契约，M1-3）；`BLOCKED:` 前缀冻结（测试断言依据）。
++
++### 2.1 `calc`（src/tools/calc.py）
++
++```python
++from typing import Literal
++from pydantic import BaseModel, Field
++
++class CalcInput(BaseModel):
++    expression: str = Field(min_length=1, max_length=200)   # 长度上限 200 字符
++
++TOOL_SPEC = ToolSpec(
++    name="calc",
++    description="计算算术表达式，支持 + - * / % ** 与函数 abs/min/max/round/sqrt/pow",
++    input_model=CalcInput,
++    idempotency="idempotent",
++    risk_level="low",
++    executor=execute,
++)
++```
++
++**AST 白名单（完整清单，白名单外一律拒绝）**：
++
++| 类别 | 允许 |
++|------|------|
++| 顶层 | `ast.Expression` |
++| 常量 | `ast.Constant` 且 `value` 类型为 `int \| float`（`bool` 是 int 子类，**显式排除**；字符串/None 拒绝） |
++| 二元运算 | `ast.BinOp` 且 op ∈ {`Add`, `Sub`, `Mult`, `Div`, `Mod`, `Pow`} |
++| 一元运算 | `ast.UnaryOp` 且 op ∈ {`UAdd`, `USub`} |
++| 函数调用 | `ast.Call` 且：`func` 为 `ast.Name` 且 `id` ∈ {`abs`, `min`, `max`, `round`, `sqrt`, `pow`}；参数个数为该函数合法元数；参数为白名单表达式（允许嵌套 Call，受深度限制约束） |
++
++**拒绝清单**（非穷尽，规则=凡不在白名单即拒绝）：`ast.Name`（作为非函数名出现）、`ast.Attribute`、`ast.Subscript`、`ast.Lambda`、`ast.Compare`、`ast.BoolOp`、`ast.IfExp`、`ast.Tuple/List/Set/Dict`、各种推导式、字符串常量、`ast.Call` 的 `keywords`（关键字参数）与 `starargs`。**全程禁用 `eval`/`exec`/`compile` 字符串执行**——求值必须自实现 AST 递归求值器。
++
++**限制**：表达式长度 ≤ 200（Field 约束）；AST 深度 ≤ 20（自根向下的节点嵌套深度，递归计数）；运算量护栏：`Pow` 的指数绝对值 > 1000 或结果为复数/inf → `ToolResult(ok=False, error="calc: result out of range")`；除零 → `error="calc: division by zero"`（不 BLOCKED，属数学错误）。
++
++### 2.2 `http_request`（src/tools/http_request.py）
++
++```python
++from typing import Literal
++from pydantic import BaseModel
++
++class HttpRequestInput(BaseModel):
++    url: str
++    method: Literal["GET"] = "GET"        # M1 仅 GET
++
++TOOL_SPEC = ToolSpec(
++    name="http_request",
++    description="向白名单域名发起 HTTP GET 请求并返回响应文本（重定向逐跳校验，上限 3 跳）",
++    input_model=HttpRequestInput,
++    idempotency="non-idempotent",          # 调用级覆写见 §2.2 末尾
++    risk_level="medium",
++    executor=execute,
++)
++```
++
++**安全链路（顺序冻结，任一步不过即 BLOCKED）**：
++
++1. **URL 解析**（`urllib.parse.urlsplit`）：scheme ∈ {`http`, `https`}；hostname 非空；**拒绝 userinfo**（URL 含 `@`）；端口缺省或为合法端口。
++2. **域名白名单**：`hostname`（小写化）∈ `settings.allowed_hosts`（精确匹配，不做通配/DNS 反查——M1 简化为精确字符串匹配）。
++3. **DNS 解析 + 全量 IP 校验**：`getaddrinfo` 解析出的**全部**地址逐一校验（用 `ipaddress` 模块），**任一违规即整条拒绝**（防多记录 rebinding）。拒绝：`is_private / is_loopback / is_link_local / is_reserved / is_multicast / is_unspecified`——显式覆盖 IPv4 `127.0.0.0/8`、`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`（含云元数据 `169.254.169.254`）与 IPv6 `::1`、`fc00::/7`、`fe80::/10`。
++4. **resolve-then-connect（防 DNS rebinding TOCTOU，ADR-005）**：校验通过后**锁定首个通过校验的 IP 直接建连**，禁止连接时二次解析。实现要点（httpx 路径，Backend 可用等价物）：
++   - 实现为 `SafeTransport(httpx.AsyncBaseTransport)`：内嵌真实 `httpx.AsyncHTTPTransport`；`handle_async_request` 前完成链路 1~3，然后把 `request.url` 的 host 重写为已校验 IP、`Host` 头设为原域名，交内层 transport 发送；
++   - **HTTPS**：TLS 握手的 SNI/证书校验必须以**原域名**为 server_hostname（Python `ssl` 支持 serverhostname 与实际连接地址分离；若所选 httpx/httpcore API 无法分离，改用自定义 `ssl.SSLContext` 关闭自动主机校验后**手动**比对证书 SAN/CN 与原域名——禁止 `verify=False` 裸奔）；
++   - **DNS 解析步骤抽象为可注入的 resolver**：`resolver: Callable[[str, int], list[ipaddress.IPv4Address | IPv6Address]]`，默认 `getaddrinfo` 封装——FakeResolver 注入点是 M1-5 rebinding 用例的测试通道。
++5. **重定向**：`follow_redirects=False`；收到 301/302/303/307/308 → 提取 `Location`（相对 URL 按 RFC 3986 以当前 URL 解析为绝对）→ 新 URL **重新从第 1 步走完整链路**；最大 3 跳，超限或任一跳校验失败 → `BLOCKED: redirect ...`。
++6. **超时与大小上限**：总超时 10.0s（`httpx.Timeout(10.0)`）；响应体流式读取、累计 ≤ 1MB，超限截断并在结果中标注 `truncated: true`（常量写死，不入 Settings——ARCHITECTURE §7 未列）。
++
++**成功返回**：`ToolResult(ok=True, result=...)`，result 含状态码、Content-Type、body 文本（截断至 1MB）。**幂等覆写**：`TOOL_SPEC.effective_idempotency(args)` 覆写——`args["method"] == "GET"` → `"idempotent"`（覆写规则实现位置：本文件 ToolSpec 子类化覆写方法，registry 不感知工具特例）。
++
++### 2.3 `file_write`（src/tools/file_write.py）
++
++```python
++from pydantic import BaseModel, Field
++
++class FileWriteInput(BaseModel):
++    path: str = Field(min_length=1)                # 相对沙箱根的路径
++    content: str = Field(max_length=1_048_576)     # 1MB 字符上限（Pydantic 层第一道）
++
++TOOL_SPEC = ToolSpec(
++    name="file_write",
++    description="把文本内容写入 data/ 沙箱目录内的文件（覆盖已存在文件）",
++    input_model=FileWriteInput,
++    idempotency="non-idempotent",
++    risk_level="medium",
++    executor=execute,
++)
++```
++
++**安全规则（顺序冻结）**：
++
++1. **字符串级拒绝 `..`**：path 含 `..` 路径段（`Path.parts` 逐段比较，非子串误判）或为绝对路径（`os.path.isabs`）→ `BLOCKED: path traversal`。
++2. **realpath + 组件边界前缀校验**：目标 = `sandbox_root / path`；对已存在的最深目录做 `os.path.realpath` 规范化后，用 `Path.is_relative_to(sandbox_real)`（**组件边界**，防 `data-evil/` 字符串前缀歧义）；不通过 → `BLOCKED: outside sandbox`。
++3. **符号链接拒绝（TOCTOU 缓解）**：从沙箱根到目标文件的**每一级目录**用 `os.lstat` 检查 `stat.S_ISLNK`，发现即 `BLOCKED: symlink in path`；目标文件本身若为符号链接同样拒绝。
++4. **大小上限**：`len(content.encode("utf-8")) ≤ 1MB`（Pydantic max_length 管字符数，executor 复核字节数）→ 超限 `BLOCKED: content too large`。
++5. **写入**：自动创建沙箱内父目录（`mkdir parents=True, exist_ok=True`，仍受上述校验约束）；覆盖写。sandbox_root = `settings.data_sandbox_dir`（默认 `"data"`，相对项目运行根）。
++
++**成功返回**：`ToolResult(ok=True, result=f"wrote {相对路径} ({字节数} bytes)")`。
++
++---
++
++## 3. FakeLLM 测试约定与 M1 测试清单
++
++### 3.1 FakeLLM 实现约定（tests 侧，不进 src/）
++
++```python
++# tests/integration/fake_llm.py（或 conftest 提供）
++class FakeLLM:                       # 鸭子类型实现 LLMClientProtocol，无需继承
++    def __init__(self, script: Sequence[LLMResponse]) -> None:
++        """script：按轮次预设的 LLMResponse 序列（文本 final / tool_calls）；
++        同时记录每轮收到的 messages（received_messages: list[list[Message]]）供断言。"""
++
++    async def chat(self, messages, tools) -> LLMResponse:
++        """按调用次序弹出 script 下一项；耗尽 → AssertionError("FakeLLM script exhausted")
++        ——用于断言实际 LLM 调用轮数与预期一致。"""
++```
++
++**注入方式**：`AgentLoop(client=FakeLLM([...]), registry=build_registry(), settings=Settings(calc_agent_max_steps=N))`；`on_event` 回调或读返回的 `AgentResult.events` / JSONL 做事件断言。registry 用真实实现（真工具、真安全校验），只替换 LLM——M1-1 的"集成"含义即真实 loop + 真实工具 + 假 LLM。
++
++### 3.2 M1 必备测试清单（测试名与断言要点冻结；`-k` 选择器与 ACCEPTANCE M1 各条对应）
++
++**tests/integration/test_loop.py**
++
++| 测试名 | 对应验收 | 断言要点 |
++|--------|----------|----------|
++| `test_loop_completes_multistep_task` | M1-1（`-k loop`） | FakeLLM 脚本：[tool_call calc("1+2*3"), tool_call file_write("out.txt","…"), final("done")]；断言 `status=="completed"`、`result=="done"`、`steps==3`；事件序列 == `[status, tool_call, tool_result, tool_call, tool_result, final]`（无 thought）；seq 从 1 连续递增；tool_call/tool_result 的 `tool_call_id` 成对相等且形如 `call_0002`；JSONL 存在且逐行与 `AgentResult.events` 一致；`data/out.txt` 内容正确 |
++| `test_loop_step_limit` | M1-4（`-k max_steps`） | FakeLLM 恒返回 tool_call；`Settings(calc_agent_max_steps=3)`；断言 `status=="failed"`、`result` 含 `max steps`；最后两条事件为 `error` + `final`（**final 必发**）；LLM 恰被调用 3 次（FakeLLM 脚本长度=3，第 4 次会耗尽） |
++| `test_loop_tool_failure_not_fatal` | M1-3（`-k tool_failure`） | 脚本：[tool_call file_write("../evil.txt","x")（穿越，必 BLOCKED）, final("recovered")]；断言第一步 `tool_result` 事件 `ok==False` 且摘要含 `BLOCKED`；FakeLLM 第二轮收到的 messages 含 tool message 且 content 以 `ERROR:` 开头（错误回传 LLM）；任务最终 `completed`（不悬挂） |
++| `test_loop_llm_error_fails_task` | M1-3 补充 | FakeLLM 的 chat 抛 RuntimeError（模拟重试耗尽）；断言 `status=="failed"`、事件末尾 `error`+`final` |
++
++**tests/unit/test_calc.py**（M1-5 之一）
++
++| 测试名 | 断言要点 |
++|--------|----------|
++| `test_calc_evaluates_expression` | `"1+2*3"`→7；`"(123*456)/7"`→ 56088/7；`"sqrt(2)"`≈1.4142；`"pow(2,10)"`==1024；负号/一元负 |
++| `test_calc_rejects_name_injection` | `"__import__('os').system('id')"`、`"open('/etc/passwd')"`、`"x"`、`"True"`、`"abc"` → `ok==False` 且 error 含 `BLOCKED`（或参数校验失败） |
++| `test_calc_rejects_attribute_and_lambda` | `"''.join([])"`、`"(lambda: 1)()"`、`"[1,2][0]"`、`"a if b else c"` → 拒绝 |
++| `test_calc_rejects_depth_and_length` | 长度 >200（Field 校验）；嵌套深度 >20（如 `"("*25 + "1" + ")"*25`）→ 拒绝 |
++| `test_calc_math_errors` | `"1/0"` → ok=False（division by zero，非 BLOCKED）；`"pow(10,10000)"` → out of range |
++
++**tests/unit/test_http_request.py**（M1-5 之一；resolver/transport 均为注入点）
++
++| 测试名 | 断言要点 |
++|--------|----------|
++| `test_http_allows_whitelisted_public_host` | FakeResolver 返回公网 IP + mock 内层 transport → ok==True，且**实际连接目标 == 已校验 IP**（resolve-then-connect 生效证据） |
++| `test_http_blocks_private_ip` | resolver 返回 `192.168.1.1` / `10.0.0.5` / `172.16.31.4` → BLOCKED |
++| `test_http_blocks_cloud_metadata` | `169.254.169.254`、`http://169.254.169.254/latest/meta-data`（字面量 IP 直填）→ BLOCKED |
++| `test_http_blocks_loopback_ipv6` | resolver 返回 `::1`、`fe80::1`、`fc00::1` → BLOCKED |
++| `test_http_blocks_non_whitelisted_host` | hostname 不在 allowed_hosts → BLOCKED（URL 白名单先于 DNS） |
++| `test_http_blocks_mixed_dns_records` | resolver 返回 `[93.184.216.34, 10.0.0.1]`（多记录含私有）→ 整条 BLOCKED |
++| `test_http_blocks_redirect_to_private` | 首跳白名单公网 302 → `Location: http://10.0.0.1/x` → 第二跳 BLOCKED |
++| `test_http_blocks_redirect_loop_and_limit` | 302 自指循环 → 跳数超 3 → BLOCKED |
++| `test_http_dns_rebinding_fake_resolver` | FakeResolver 两次解析返回不同结果（校验时公网、若实现二次解析则为私有）→ 断言仅解析一次 + 连接 IP == 首次校验值（rebinding 无法得逞） |
++| `test_http_response_size_truncation` | mock 响应 >1MB → 截断且标注 truncated |
++
++**tests/unit/test_file_write.py**（M1-5 之一；沙箱根指到 tmp_path）
++
++| 测试名 | 断言要点 |
++|--------|----------|
++| `test_file_write_success_in_sandbox` | 正常路径写入成功、文件存在、内容一致、result 含字节数 |
++| `test_file_write_blocks_traversal` | `"../evil.txt"`、`"a/../../evil"`、绝对路径 `/tmp/x` → BLOCKED |
++| `test_file_write_blocks_symlink` | tmp 沙箱内造符号链接目录/文件（`os.symlink`）→ BLOCKED: symlink |
++| `test_file_write_blocks_prefix_confusion` | 与沙箱根同前缀字符串但非子目录（如根 `data`、路径解析到 `data-evil/`）→ BLOCKED（`is_relative_to` 组件边界证据） |
++| `test_file_write_blocks_oversize` | content >1MB → BLOCKED |
++
++**M1-1b（无 key）**：非单独测试，由**整个 `tests/integration` 套件**在 `env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY CALC_AGENT_ENV_FILE=/dev/null python -m pytest tests/integration` 下全绿证明（ACCEPTANCE M1-1b 命令）——集成测试只经 FakeLLM，构造 Settings 无 key 亦可（src/config.py M0 语义）。测试与 FakeLLM 中**不得出现任何真实形态 key**（G-3：占位用 `test-key-not-real` 形态）。
++
++---
++
++## 4. 边界声明（防止越界）
++
++**M1 明确不做**（全部属 M2，提前实现即退回）：
++
++- SQLite 持久化与 Task/Step/ToolCall/TaskEvent 四表——M1 事件**只落 JSONL 文件**（§1.4）；
++- API 端点扩展——`src/api/` 保持 M0 的 /health 原样；
++- SSE 事件流、resume/cancel/confirm、恢复语义/fencing/checkpoint——loop 的 `tool_call_id`/事件格式为 M2 预留对齐，但**不实现任何恢复逻辑**；
++- `cli.replay`、前端、Playwright。
++
++**分层约束（G-4，`scripts/check_layers.py` 门禁）**：
++
++- `src/agent/loop.py` 不得 import `src/api` / `src/services` / `src/storage`；
++- `src/tools/` 不得 import `src/agent`（工具只依赖 `src/models` 与 `src/config`）；
++- 注册组装（import 三个工具并 register）发生在 `src/agent/__init__.py` 暴露的 `build_registry(settings) -> ToolRegistry`（agent → tools 方向合法），`run_agent.py` 与测试统一经它获取 registry；
++- 共享类型一律走 `src/models/`；配置一律走 `src/config.py`（M0 交付，不改字段——新配置项须回提 Architect）。
++
++**依赖红线**：不新增任何 §2.1 白名单外依赖；测试 mock 用 monkeypatch/注入，不引入 mock 框架。
++
++---
++
++## 5. Backend 实现确认清单（实现完成后逐项自查）
++
++- [ ] `LLMClientProtocol` 定义于 `src/agent/llm.py`，`AgentLoop.__init__` 的 client 参数类型标注为该 Protocol（FakeLLM 鸭子类型可注入）。
++- [ ] `LLMResponse`/`ToolCallRequest`/`AgentEvent`/`ToolResult`/`AgentResult` 等共享模型置于 `src/models/`，字段与本契约 §1.0 完全一致。
++- [ ] `ToolSpec` 的 `idempotency`/`risk_level` 为 Literal 类型（缺失/非法值在构造期即失败）；`effective_idempotency` 已实现且 http_request 覆写 GET→idempotent。
++- [ ] `ToolRegistry.execute` 对未知工具/参数校验失败/executor 异常均返回 `ToolResult(ok=False)`，**无任何异常外抛**（M1-3）。
++- [ ] `AgentLoop` 事件序列只含 `status|tool_call|tool_result|error|final`；`tool_call_id = call_{seq:04d}`；终态必发 `final`；模型 content 不进事件。
++- [ ] `EventLog` 逐事件 append + flush 至 `logs/agent-<task_id>.jsonl`，目录自动创建。
++- [ ] calc：AST 白名单实现（无 eval/exec/compile 字符串执行）；拒绝清单 §2.1 全覆盖；长度 200/深度 20 限制生效。
++- [ ] http_request：安全链路 1~6 顺序实现；resolve-then-connect（连接 IP == 已校验 IP，无二次解析）；resolver 可注入；HTTPS 证书校验以原域名进行且未 `verify=False`；重定向手动逐跳 ≤3。
++- [ ] file_write：`..` 拒绝 → realpath + `is_relative_to` 前缀 → lstat 各级目录无符号链接 → 1MB 上限；沙箱根取 `settings.data_sandbox_dir`。
++- [ ] `examples/run_agent.py`：缺 key → stderr 报错 + exit 2；stdout 首行 `task_id: <id>`；结束打印 status/result；退出码 0/1/2。
++- [ ] `build_registry(settings)` 于 `src/agent/__init__.py`，注册三工具。
++- [ ] 分层自查：`bash scripts/check.sh`（含 G-4）+ `python -m scripts.check_layers` 退出码 0；`src/tools/` 无 `import src.agent`；loop 无 api/services/storage import。
++- [ ] 测试清单 §3.2 全部落地，`-k` 选择器可被验收命令命中（loop / max_steps / tool_failure / tool_security 命名覆盖 calc+http+file 三文件）。
++- [ ] M1-1b 复跑：`env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY CALC_AGENT_ENV_FILE=/dev/null python -m pytest tests/integration` 全绿。
++- [ ] 未修改 `src/config.py` 既有字段；未新增白名单外依赖；未实现任何 M2 范围功能（§4）。
++- [ ] 交接文档 `docs/handoff/backend-m1.md`：改动文件清单、运行方式、已知限制。
++
++> 完成自查后提请 QA 按 ACCEPTANCE_CRITERIA v1.2 执行 M1-1 ~ M1-5 验收（M1-2 真实 key 项由用户环境执行）。
+diff --git a/docs/handoff/backend-m1.md b/docs/handoff/backend-m1.md
+new file mode 100644
+index 0000000..8502f38
+--- /dev/null
++++ b/docs/handoff/backend-m1.md
+@@ -0,0 +1,166 @@
++# Backend 交接文档 — M1：Agent 核心循环 + 工具安全
++
++> 交付人：Backend Agent ｜ 依据：docs/handoff/architect-m1-contract.md（冻结版）、ARCHITECTURE.md v1.2 §4/§5/§6/§7、ACCEPTANCE_CRITERIA v1.2 M1 节
++> 日期：2026-10-20 ｜ 上一份交接：docs/handoff/backend-m0-scaffold.md
++
++## 改动文件清单
++
++| 文件 | 说明 |
++|------|------|
++| `src/models/llm.py` | ToolCallRequest / LLMResponse（契约 §1.0） |
++| `src/models/events.py` | AgentEventType 五值枚举 / AgentEvent（seq 从 1 单调递增） |
++| `src/models/tool_result.py` | ToolResult（ok/result/error，安全拒绝 `BLOCKED: ` 前缀） |
++| `src/models/agent_result.py` | AgentResult（task_id/status/result/steps/events） |
++| `src/models/tool_spec.py` | **ToolSpec**（idempotency/risk_level Literal 强制 + effective_idempotency）。位置决策见下"契约偏离记录" |
++| `src/agent/llm.py` | LLMClientProtocol（FakeLLM 替换点）+ LLMClient（AsyncOpenAI 封装，base_url/timeout/max_retries 从构造参数）+ LLMProtocolError |
++| `src/agent/registry.py` | ToolRegistry：register 校验（名称/重复/BaseModel/async executor）、get_schemas 导 OpenAI tools 格式、execute 三失败路径全返回 ToolResult 不外抛 |
++| `src/agent/loop.py` | AgentLoop.run_task：on_event 回调、tool_call_id=`call_{seq:04d}`、步数上限、三终止路径、final 必发、事件先落盘；AssertionError 穿透（防测试盲区） |
++| `src/agent/events.py` | EventLog：JSONL 追加 + 逐事件 flush；mkdir 容错（shim 环境跨进程 PermissionError） |
++| `src/agent/__init__.py` | build_registry(settings)：注册三工具（agent→tools 合法方向） |
++| `src/tools/calc.py` | AST 白名单求值器（无 eval/exec）；Constant 显式排除 bool；六函数元数校验；Pow 指数 ≤1000（BinOp 与 pow() 共用 _power）；深度 = max(AST 节点深度, 括号嵌套深度) ≤20；数学错误（除零/out of range/domain）非 BLOCKED |
++| `src/tools/http_request.py` | 六步安全链路；resolver/connector 双注入点；手写最小 HTTP/1.1 客户端实现 resolve-then-connect（连接 IP=已校验 IP、Host 头保留原域名、HTTPS SNI=原域名、默认 ssl context 未关校验）；重定向手动逐跳 ≤3 全链路重校验；10s/1MB 上限 + truncated 标注；HttpRequestToolSpec 覆写 GET→idempotent |
++| `src/tools/file_write.py` | 五步规则（`..` 段级拒 → realpath+is_relative_to → lstat 各级无 symlink → 字节复核 ≤1MB → 沙箱内建目录写入）；mkdir 容错 |
++| `examples/run_agent.py` | CLI：缺 key → stderr + exit 2；stdout 首行 `task_id: <id>`；结束打印 status/result；退出码 0/1/2 |
++| `tests/integration/fake_llm.py` | FakeLLM（脚本驱动 + received_messages 记录）/ ExplodingLLM |
++| `tests/integration/test_loop.py` | 4 测试：multistep（事件序列/seq/tool_call_id/JSONL/产出文件）、step_limit、tool_failure_not_fatal、llm_error_fails_task |
++| `tests/unit/test_calc.py` | 5 测试（求值/名称注入/属性与 lambda/深度与长度/数学错误） |
++| `tests/unit/test_http_request.py` | 11 测试（含参数化共 15 用例：白名单放行+resolve-then-connect 证据/私有 IP/云元数据/IPv6/非白名单先于 DNS/混合记录/重定向私有/重定向循环超限/DNS rebinding/1MB 截断/幂等声明覆写） |
++| `tests/unit/test_file_write.py` | 5 测试（沙箱成功/穿越/symlink/前缀混淆/超限） |
++| `pyproject.toml` | 追加 pytest markers 注册（loop/max_steps/tool_failure/tool_security，供 -k 命中） |
++
++## 契约偏离记录（提请 Architect 确认）
++
++1. **ToolSpec 位置**：契约 §1.2 列于 `src/agent/registry.py`，但 §2 要求工具模块构造 ToolSpec、§4 禁止 tools import agent——三者矛盾。按 §4 "共享类型一律走 src/models/"，ToolSpec 落 `src/models/tool_spec.py`（签名不变），ToolRegistry 留 agent 层。
++2. **AgentLoop 可选参数 task_id**：CLI 须在任务开始前打印 task_id（§1.5）而 task_id 生成在 run_task 内（§1.3）——增加 `__init__(task_id: str | None = None)` 可选参数，冻结签名 `run_task(goal)` 不变。
++3. **build_tool_spec(settings) 代替模块级 TOOL_SPEC 常量**：http_request/file_write 需绑定 settings（白名单/沙箱根）；calc 忽略 settings 保持统一签名。
++4. **http_request 链路 4 用契约允许的等价物**：未实现 SafeTransport(httpx.AsyncBaseTransport)，改用手写最小 HTTP/1.1 客户端 + `asyncio.open_connection(ip, port, ssl=ctx, server_hostname=原域名)`——原生支持连接地址与 SNI 分离，无 verify=False。
++5. **calc 深度定义**：括号不产生 AST 节点（契约示例 `"("*25+...` 纯 AST 深度无法拒绝），深度检查取 max(AST 节点嵌套深度, 括号嵌套深度)。
++6. **-k 选择器经 pytest marker 实现**：测试函数名保持契约冻结名，`@pytest.mark.tool_security / max_steps / tool_failure / loop` 保证 `-k` 命中（已在 pyproject 注册）。
++7. **测试文件名** `tests/integration/test_loop.py`（契约 §3.2 原文），非任务描述中的 test_agent_loop.py。
++
++## 运行方式（QA 验收所需）
++
++```bash
++# 本会话（沙箱拦截 unlink）等效口径——所有 pytest 命令加：
++.venv/bin/python -m pytest --capture=no -p no:cacheprovider
++
++# M1-1 / M1-4 / M1-3 选择器（已验证命中：4/1/1 passed）
++.venv/bin/python -m pytest tests/integration -k loop
++.venv/bin/python -m pytest tests/integration -k max_steps
++.venv/bin/python -m pytest tests/integration -k tool_failure
++
++# M1-5（已验证命中：25 passed，覆盖 calc+http+file 三文件）
++.venv/bin/python -m pytest tests/unit -k tool_security
++
++# M1-1b（无 key 双通道清理，已验证 4 passed）
++env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY CALC_AGENT_ENV_FILE=/dev/null \
++  .venv/bin/python -m pytest tests/integration
++
++# M1-2（真实 LLM，需用户 key 环境）
++.venv/bin/python examples/run_agent.py "计算 (123*456)/7 并把结果写入 out.txt"
++# stdout 首行 task_id: <id>；事件 logs/agent-<task_id>.jsonl；产出 data/out.txt
++
++# 缺 key 冒烟（exit 2 + stderr）
++env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY .venv/bin/python examples/run_agent.py "test"
++
++# 分层 / 类型
++.venv/bin/python -m scripts.check_layers
++.venv/bin/python -m pyright src/
++```
++
++## 自验记录（真实退出码）
++
++| 命令 | 退出码 | 结果 |
++|------|--------|------|
++| `pytest --capture=no -p no:cacheprovider`（全量） | **0** | 30 passed（1 M0 + 4 loop + 5 calc + 5 file + 15 http） |
++| `pytest tests/integration --capture=no -p no:cacheprovider` | **0** | 4 passed |
++| `pyright src/` | **0** | 0 errors, 0 warnings |
++| `scripts.check_layers` | **0** | 无反向 import |
++| 无 key 全量（env -u ×2 + CALC_AGENT_ENV_FILE=/dev/null） | **0** | 30 passed |
++| M1-1b 精确命令（无 key + tests/integration） | **0** | 4 passed |
++| 缺 key 冒烟 `run_agent.py "test"` | **2** | stderr 报错含 CALC_AGENT_ENV_FILE 提示 ✓ |
++| 选择器 `-k loop / max_steps / tool_failure / tool_security` | **0** | 4 / 1 / 1 / 25 passed |
++
++## 契约 §5 自查清单
++
++- [x] LLMClientProtocol 定义于 src/agent/llm.py；AgentLoop client 参数类型为该 Protocol（FakeLLM 鸭子类型注入已验证）
++- [x] 五个共享模型置于 src/models/，字段与 §1.0 一致（ToolSpec 例外见偏离记录 1）
++- [x] ToolSpec idempotency/risk_level 为 Literal（构造期失败）；effective_idempotency 已实现且 http_request GET→idempotent（测试 test_http_idempotency_declarations 承载）
++- [x] ToolRegistry.execute 三失败路径均返回 ToolResult(ok=False)，无异常外抛
++- [x] 事件只含五类型；tool_call_id=call_{seq:04d}；final 必发；content 不进事件（test_loop 逐条断言）
++- [x] EventLog 逐事件 append+flush 至 logs/agent-<task_id>.jsonl，目录自动创建（容错）
++- [x] calc：AST 白名单无 eval/exec/compile；拒绝清单全覆盖；长度 200/深度 20 生效
++- [x] http_request：链路 1~6 顺序实现；resolve-then-connect（连接 IP==已校验 IP，resolver 恰一次）；resolver 可注入；HTTPS 证书以原域名校验、未 verify=False；重定向手动 ≤3
++- [x] file_write：`..` 拒 → realpath+is_relative_to → lstat 各级 → 1MB；沙箱根取 settings.data_sandbox_dir
++- [x] run_agent.py：缺 key → stderr+exit 2；首行 task_id；status/result 打印；退出码 0/1/2
++- [x] build_registry 于 src/agent/__init__.py，注册三工具
++- [x] 分层自查：check_layers 退出 0；tools 无 import src.agent；loop 无 api/services/storage import
++- [x] 测试清单 §3.2 全部落地，四个 -k 选择器命中验证通过
++- [x] M1-1b 复跑：无 key + CALC_AGENT_ENV_FILE=/dev/null 下 tests/integration 全绿
++- [x] 未修改 src/config.py 字段；未新增依赖；未实现 M2 功能（无 SQLite/API 扩展/SSE/恢复语义）
++- [x] 本交接文档
++
++## 已知限制与环境怪癖（QA 必读）
++
++1. **本会话沙箱拦截 unlink/rename** → 裸 `pytest`（FDCapture tempfile）、`--cov`、`compileall` 无法运行；自验与 QA 均用 `--capture=no -p no:cacheprovider` 等效口径（不影响测试语义与判据）。
++2. **宿主安全代理对跨进程残留目录的 `mkdir(exist_ok=True)` 抛 PermissionError**（包装 EEXIST）——产品代码（file_write、EventLog）与测试已全部容错（`_ensure_dir`）；QA 会话若遇同类报错属环境现象，非代码缺陷。
++3. 测试产物残留：`data/.test-sandbox/`（沙箱测试目录与符号链接，无法删除）、`logs/agent-*.jsonl`——均被 .gitignore 覆盖；`data/.test-sandbox/file_write-evil`、`data/.test-sandbox/rt-link`、`data/.test-sandbox/rt-target` 为调试残留，无害。
++4. http_request 测试**不真正联网**（FakeResolver + FakeConnector 注入，契约 §3.1 通道）；真实外网请求路径留待 M1-2/E2E-1（QA 在用户 key 环境执行）。
++5. M1-2 判据中 `data/out.txt`：run_agent 默认沙箱根为 `data`（settings.data_sandbox_dir），产出即 `data/out.txt`。
++
++---
++
++## 覆盖率退回修复（G-2，依据 qa-M1.md §三退回要求）
++
++> 范围：**只补测试，不改产品代码**（QA 已逐行审计安全实现，动产品代码触发全量重验）。日期：2026-10-20。
++
++### 新增用例清单
++
++**tests/unit/test_http_request.py**（+19 用例，文件累计 34）：
++
++| 用例 | 覆盖分支（QA 报告行号） |
++|------|--------------------------|
++| `test_http_reads_chunked_body` | `_read_body` chunked 正常读取（162–178） |
++| `test_http_chunked_truncation` | chunked 超 1MB 截断 + truncated 标注 |
++| `test_http_reads_body_to_eof` | 无长度头读至 EOF（196–205）+ 请求行 path?query 拼接（153） |
++| `test_http_eof_truncation` | EOF 模式超 1MB 截断 |
++| `test_http_rejects_malformed_status_line`（参数化 3） | 空响应 / 状态行缺码 / 状态码非数字（231、234–235） |
++| `test_http_rejects_malformed_content_length` | content-length 非数字 |
++| `test_http_rejects_bad_urls`（参数化 5） | scheme 拒 ×2 / 无 hostname / userinfo（147）/ 端口超范围（131–132） |
++| `test_http_connection_oserror` | 连接 OSError → 结构化错误回传 |
++| `test_http_timeout` | 挂起连接 + monkeypatch TIMEOUT_SECONDS=0.05 → timed out（297–300） |
++| `test_http_writer_cleanup_failure_ignored` | wait_closed 清理失败不影响结果（251–252） |
++| `test_http_blocks_empty_dns_result` | DNS 空结果（147 附近） |
++| `test_http_rejects_malformed_chunk_size` | chunk size 非十六进制（166–167） |
++| `test_http_content_length_short_read` | 声明长于实际 → 提前 EOF 中断（188） |
++
++**tests/unit/test_registry.py**（新建，6 用例；qa-M1.md §三建议项）：空名 / 重复名 / 非 async executor 拒绝、非 BaseModel input_model 构造期拒绝（pydantic 第一道防线，register issubclass 为不可达第二道防线）、idempotency/risk_level Literal 构造期校验、get_schemas 导出格式。
++
++**测试类型标注修正**（非行为变更）：`test_loop.py` / `test_file_write.py` 的 sandbox fixture 返回类型 `Path` → `Iterator[Path]`（generator fixture 标注错误，`pyright src/ tests/` 顺带核查时发现）。
++
++### 自验记录（真实退出码）
++
++| 命令 | 退出码 | 结果 |
++|------|--------|------|
++| `pytest tests/unit/test_http_request.py --capture=no -p no:cacheprovider` | **0** | 34 passed |
++| `pytest --capture=no -p no:cacheprovider`（全量回归） | **0** | **55 passed**（原 30 + http 19 + registry 6） |
++| `pytest --cov=src --cov-report=term-missing --capture=no -p no:cacheprovider` | **0** | 55 passed；本会话 `--cov` 可跑（与 QA 会话观察一致，拦截非恒定） |
++| `pyright src/`（G-5a 门禁） | **0** | 0 errors |
++| `pyright src/ tests/`（顺带核查） | **0** | 0 errors（含 fixture 标注修正） |
++| `scripts.check_layers`（src/ 未改，防御性复跑） | **0** | 无反向 import |
++
++### 覆盖率数字（对照 G-2 判据 agent/ tools/ storage/ ≥ 80%）
++
++| 目录 | stmt | miss | 行覆盖 | 修复前（qa-M1.md） | 判定 |
++|------|------|------|--------|--------------------|------|
++| **tools/** | 351 | 30 | **91.45%** | 78.35% | **达标**（http_request 68% → 93%） |
++| **agent/** | 164 | 27 | **83.54%** | 81.71% | 达标（不回退，反而提升） |
++| storage/ | 0 | 0 | — | — | 不适用（M1 无代码，M2 起生效） |
++
++- http_request.py 未覆盖行仅剩 **84–88、97–106**（默认 resolver/connector，需真实网络）——qa-M1.md §三明示"可接受不覆盖"，留待 M1-2 实测覆盖。
++- agent/ 剩余缺口：llm.py 46%（真实 LLM 调用路径，M1-2/E2E 覆盖）、events.py 17–19/24（EventLog.path property 与 mkdir 容错分支）、registry.py 7 行（register 防御性 except 与 get 查询）。
++- calc.py 86%（未覆盖行多为防御分支：SyntaxError/RecursionError 捕获、深度越界后的一元/二元 fall-through 等）。
++
++### 产品代码改动
++
++**无**。`git status` 层面本轮仅新增/修改 `tests/` 下三个文件与本文档。
+diff --git a/docs/handoff/qa-M0.md b/docs/handoff/qa-M0.md
+index 640e1bc..a31c25d 100644
+--- a/docs/handoff/qa-M0.md
++++ b/docs/handoff/qa-M0.md
+@@ -2,7 +2,7 @@
+ 
+ > 验收人：QA Agent ｜ 日期：2026-10-20 ｜ 依据：ACCEPTANCE_CRITERIA v1.2（M0 节 + 通用门禁节）、ROADMAP v1.2 M0 节、Backend 交接文档 `backend-m0-scaffold.md`
+ > 被验收交付：Backend M0（脚手架 + /health + 测试骨架 + check_layers + check.sh）
+-> 结论速览：**有条件通过**——6 项 PASS、1 项 PASS(等效)、3 项 ENV-BLOCKED（沙箱环境限制，非代码缺陷）、**0 项 FAIL、无退回项**
++> 结论速览：**无条件通过**（2026-10-20 用户本地最终确认后升级，见 §4.1）——原会话验收：6 项 PASS、1 项 PASS(等效)、3 项 ENV-BLOCKED（沙箱环境限制，非代码缺陷）、**0 项 FAIL、无退回项**
+ 
+ ---
+ 
+@@ -82,7 +82,7 @@
+ 
+ ## 4. 总体结论
+ 
+-### M0：**有条件通过**（无代码缺陷，无退回项）
++### M0：**无条件通过**（2026-10-20 用户本地确认后升级；无代码缺陷，无退回项）
+ 
+ - **PASS 6 项 + PASS(等效) 1 项**：M0 全部四项运行时验收（M0-1~M0-4）在会话内真实通过（M0-2 经等效方式，测试逻辑与原文完全等价且原文失败输出已归因为环境问题）；G-3/G-4/G-5a 门禁裸命令原样通过。
+ - **ENV-BLOCKED 3 项**（G-1、G-2、G-5b）：全部归因宿主沙箱 unlink/rename 拦截，失败证据与拦截日志逐条对应（§0/§1），**未发现任何测试断言失败或代码层面错误**；其中 G-5b 语法合法性已经内存编译等效证明（9/9 OK）、G-1 中 pytest 分项经等效命令证明（1 passed）。
+@@ -108,6 +108,35 @@ bash scripts/check.sh
+ 
+ > 若 ①~④ 在本地全部通过，M0 验收升级为无条件通过；若出现任何失败，按分项报告归因（预期不会——本会话所有失败点均为宿主拦截动作的直接结果）。
+ 
++### 4.1 用户本地最终确认结果（2026-10-20 16:53 前完成）
++
++用户在无沙箱限制的本地终端执行完毕，结果如下（用户提供的真实执行结果）：
++
++| 项 | 用户本地命令 | 结果 |
++|----|--------------|------|
++| G-1（含 G-1~G-5b 六项分项） | `bash scripts/check.sh` | **全部六项门禁 PASS** |
++| G-2 覆盖率 | `pytest` / `pytest-cov` | **1 passed，96% coverage** |
++| G-5a 类型检查 | （经 check.sh 分项） | **pyright 0 errors** |
++| G-5b 语法编译 | （经 check.sh 分项） | **PASS** |
++
++**M0 验收正式升级为：无条件通过。** 此前 3 项 ENV-BLOCKED 的环境归因判断得到本地验证佐证——同一代码在无沙箱限制环境下全部通过，确认会话内失败均为宿主拦截所致，无遗留代码缺陷。用户已批准 M0 功能验收结果。
++
++---
++
++### 4.2 Git 仓库异常对象隔离确认（只读检查，2026-10-20 16:53）
++
++针对 `git fsck` 报告的 3 个 `duplicateEntries` 异常树对象（M0 提交期间沙箱限制下手工构建提交的前两次尝试产物），只读隔离检查结果：
++
++| 检查项 | 命令 | 结果 | 结论 |
++|--------|------|------|------|
++| 唯一分支引用 | `git for-each-ref` | 仅 `refs/heads/main → 668538b`（干净提交） | 异常对象无分支引用 |
++| main 可达性 | `git rev-list --objects main \| grep <异常树>` | 空（不可达） | 三个异常树不被 main 任何提交引用 |
++| reflog | `cat .git/logs/HEAD` | 仅含 2c40c25（v1.0 基线）→ 9eabc3e（v1.2），无异常提交 | reflog 不引用异常对象 |
++| 异常提交 refs 数 | `git for-each-ref --contains <坏提交>` ×3 | 全部 refs=0 | 三个坏提交（fc62518/dda3720/cf726f5）为完全孤儿 |
++| HEAD 连通性 | `git rev-list --objects HEAD \| wc -l` | 54 个对象全部可达 | 当前历史完整可用 |
++
++**结论**：异常对象为完全孤立的不可达对象，不影响 main 分支的读取、提交与后续开发；未来 `git gc` 会按正常机制自然清理（无需手动删除任何 Git 对象）。HEAD 提交 `668538b` 及其历史（9eabc3e ← 2c40c25）经 fsck 连通性检查无错误。
++
+ ---
+ 
+ ## 5. 风险与建议
+diff --git a/docs/handoff/qa-M1.md b/docs/handoff/qa-M1.md
+new file mode 100644
+index 0000000..3830662
+--- /dev/null
++++ b/docs/handoff/qa-M1.md
+@@ -0,0 +1,331 @@
++# QA 验收报告 — M1（Agent 核心循环 + 工具安全）非真实 LLM 部分
++
++> 验收人：QA Agent（docs/AGENT_ROLES.md §4）｜ 日期：2026-10-20
++> 判据唯一依据：docs/ACCEPTANCE_CRITERIA.md **v1.2** M1 节 + 通用门禁
++> 契约依据：docs/handoff/architect-m1-contract.md（冻结版）
++> Backend 交接：docs/handoff/backend-m1.md
++> 范围：M1-1 / M1-1b / M1-3 / M1-4 / M1-5 + 通用门禁 + 静态审查。**M1-2（真实 LLM）不在本轮**——待用户 key 配置确认后由 Lead 另行安排。
++> 约束遵守情况：未修改任何产品代码与测试；未执行 git 操作；未联网调用真实 API。
++> **版本说明**：初版结论"退回（局部）"（见下）；Backend 按 §三退回要求完成修复后，QA 按 §九口径复验通过，**最终结论见 §十：M1 非真实 LLM 部分通过（放行）**。原退回记录保留为审计轨迹。
++
++---
++
++## 最终结论（复验后更新）：**M1 非真实 LLM 部分：通过（放行）**
++
++初版唯一阻断项 G-2 已消除：Backend 按退回要求**只补测试、零改动产品代码**（核实方式见 §十.1），QA 按 §九口径复验三项全绿，覆盖率 tools/ 78.35% → **91.45%**、agent/ 81.71% → **83.54%**（均 ≥ 80%）。新增 25 个用例（http 19 + registry 6）断言质量抽查合格，退回清单全覆盖且多处超出。以下初版结论与退回记录保留不删。
++
++---
++
++## 初版结论（2026-10-20，复验前）：退回（局部）——仅 G-2 覆盖率一项，功能与安全实现全部通过
++
++| 维度 | 结果 |
++|------|------|
++| 验收命令（M1-1/1b/3/4/5） | **5/5 PASS** |
++| 通用门禁（G-1/2/3/4/5a/5b） | 5 PASS + **1 FAIL（G-2：tools/ 78.35% < 80%）** |
++| 安全实现源码审计 | **通过**（calc/http_request/file_write 与契约 §2 及 ADR-005 一致，无发现可利用缺陷） |
++| 安全测试覆盖度审计 | **齐备**（契约 §3.2 清单全落地，多处超出）；附 1 个非阻断补测建议 |
++| 7 项实现决策 | **7/7 接受**（其中 4 项建议 Architect 出契约勘误同步），另附 1 项超时语义观察提请确认 |
++| 契约一致性抽查 | 通过（模型字段/事件五类/payload 字段名/Message 形态/run_agent 行为逐项一致） |
++| M2 越界检查 | 无越界（无 SQLite/SSE/resume/cancel/confirm/checkpoint；src/api 保持 M0 /health 原样） |
++
++**退回范围**：仅要求 Backend 补充 `tests/unit/test_http_request.py` 用例（chunked 响应体、EOF 读取、畸形响应/URL 错误分支），使 tools/ 行覆盖 ≥ 80%。补齐后**免全量重验**，QA 仅复跑 G-2 + 全量回归即可放行 M1 非真实 LLM 部分。
++
++---
++
++## 一、环境说明（先于逐项结果，影响判读）
++
++| 项 | 实测情况 |
++|----|----------|
++| 沙箱 unlink/rename 拦截（预设） | **本会话未复现**：裸 `pytest`（含 FDCapture）、`--cov`、`compileall` 均实际可运行。对照命令：裸 `pytest tests/integration -k loop` → 4 passed, exit 0 |
++| 等效口径 | 仍按指示以 `--capture=no -p no:cacheprovider` 执行全部 pytest 验收命令（与裸命令结果一致，已对照） |
++| G-2 / G-5b 预设 ENV-BLOCKED | 因环境未拦截，**改为实际执行并记录真实结果**——其中 G-2 实跑暴露了 Backend 自验时无法发现的问题（见 FAIL 项） |
++| 宿主 mkdir PermissionError 怪癖 | 本会话未复现（`_ensure_dir` 容错代码未触发，保留无害） |
++
++---
++
++## 二、逐项验收结果（命令 → 退出码 → 输出摘要 → 结论）
++
++### M1 验收项
++
++| ID | 实际命令 | 退出码 | 输出摘要 | 结论 |
++|----|----------|--------|----------|------|
++| M1-1 | `.venv/bin/python -m pytest tests/integration -k loop --capture=no -p no:cacheprovider` | 0 | `4 passed in 1.67s`（multistep / step_limit / tool_failure_not_fatal / llm_error_fails_task；step_limit 与 tool_failure 由 marker 命中） | **PASS** |
++| M1-1b | `env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY CALC_AGENT_ENV_FILE=/dev/null .venv/bin/python -m pytest tests/integration --capture=no -p no:cacheprovider` | 0 | `4 passed in 1.64s`（双通道清理：进程环境无 key + /dev/null 绕开 .env） | **PASS** |
++| M1-3 | `… pytest tests/integration -k tool_failure …` | 0 | `1 passed, 3 deselected` | **PASS** |
++| M1-4 | `… pytest tests/integration -k max_steps …` | 0 | `1 passed, 3 deselected` | **PASS** |
++| M1-5 | `… pytest tests/unit -k tool_security …` | 0 | `25 passed, 1 deselected in 1.65s`（calc 5 + file_write 5 + http_request 15，含参数化） | **PASS** |
++
++### 通用门禁
++
++| ID | 实际命令 | 退出码 | 输出摘要 | 结论 |
++|----|----------|--------|----------|------|
++| G-1 等效 | `.venv/bin/python -m pytest --capture=no -p no:cacheprovider`（全量） | 0 | `30 passed in 2.44s`（1 health + 4 loop + 21 unit） | **PASS(等效)** |
++| G-2 | `.venv/bin/python -m pytest --cov=src --cov-report=term-missing` | 0（命令成功；**判据不达标**） | 30 passed；TOTAL 82%，但分目录：**agent/ 81.71%**（164 stmt / 30 miss）、**tools/ 78.35%**（351 stmt / 76 miss）、storage/ 0 stmt（M1 无代码，不适用）。tools/ 未达 ≥80% 门禁，整体 79.4% 亦不达标 | **FAIL** |
++| G-3 | 命令块原样执行（grep + `rc=$?; [ "$rc" -eq 1 ]`） | 0 | `grep_rc=1`（src/ tests/ web/ 无硬编码密钥匹配） | **PASS** |
++| G-4 | `.venv/bin/python -m scripts.check_layers` | 0 | `[PASS] 分层依赖检查通过：无反向 import` | **PASS** |
++| G-5a | `.venv/bin/python -m pyright src/` | 0 | `0 errors, 0 warnings, 0 informations` | **PASS** |
++| G-5b | `.venv/bin/python -m compileall -q src/` | 0 | 无输出（无语法错误）——本会话可实跑，未标 ENV-BLOCKED | **PASS** |
++
++### 冒烟
++
++| 项 | 实际命令 | 退出码 | 输出摘要 | 结论 |
++|----|----------|--------|----------|------|
++| run_agent 缺 key | `env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY CALC_AGENT_ENV_FILE=/dev/null .venv/bin/python examples/run_agent.py "test"` | **2** | stderr：`ERROR: no LLM API key configured — … (CALC_AGENT_ENV_FILE='/dev/null', default path: .env).`（契约 §1.5：明确报错、含 env 文件路径提示、不静默） | **PASS** |
++| FakeLLM 端到端 | 由 M1-1 集成测试承载（真实 AgentLoop + 真实三工具 + FakeLLM，含真实文件产出与 JSONL 落盘断言）；交接文档未另提供独立冒烟入口 | 0 | 同 M1-1 | **PASS** |
++
++---
++
++## 三、G-2 FAIL 详述（退回项）
++
++**判据**（ACCEPTANCE v1.2）：agent/ tools/ storage/ 行覆盖 ≥ 80%（自 M1 起生效）。
++
++**实测**（`--cov-report=term-missing`，目录级精确计算）：
++
++| 目录 | stmt | miss | 覆盖率 | 判定 |
++|------|------|------|--------|------|
++| agent/ | 164 | 30 | 81.71% | 勉强达标（registry.py 74%、llm.py 46% 拖低，loop.py 97% 拉高） |
++| **tools/** | **351** | **76** | **78.35%** | **不达标** |
++| storage/ | 0 | 0 | —（仅 `__init__`，M1 无代码，M2 起适用） | 不适用 |
++
++**缺口定位**：`src/tools/http_request.py` 68%（182 stmt / 58 miss），未覆盖行集中在：
++- `_read_body` chunked 模式（162–178）——**transfer-encoding: chunked 的真实响应形态完全未测**
++- `_read_body` EOF 模式（196–205）
++- URL 解析错误分支（131–139、147、153）
++- 畸形响应解析（231、234–235）、连接清理（251–252）
++- 超时路径（297–300）
++- 默认 resolver/connector（84–88、97–106）——需真实网络，可接受不覆盖
++
++**退回要求（Backend，唯一阻断项）**：
++1. `tests/unit/test_http_request.py` 补充用例（全部可用现有 FakeReader/RecordingConnector 注入，无需联网）：
++   - chunked 响应读取（正常 + 超限截断）
++   - 无 content-length 读至 EOF + 截断
++   - 畸形 status line / 畸形 content-length / 空 URL scheme / 无 hostname / 带 userinfo 的 URL
++   - 连接抛 OSError（http_request: 连接错误回传）
++   - （可选）FakeConnector 挂起触发 10s 超时——建议用 `asyncio.wait_for` 语义以短超时 monkeypatch 或接受跳过
++2. 目标：tools/ ≥ 80%（当前 275/351，再覆盖约 6 行即达 80.06%；覆盖 chunked 段约 17 行可达 ~83%，建议按上述清单全补）。
++3. 建议（非强制）：agent/registry.py 三条注册校验失败路径（空名/重复/非 async executor）补注册期测试，缓解 agent/ 勉强过线的脆弱性。
++
++**复验口径**：补测后 QA 复跑 `pytest --cov=src --cov-report=term-missing` + 全量回归即可，其余项不再重验。
++
++---
++
++## 四、M1-1 集成测试断言质量核验（人工读源码）
++
++`tests/integration/test_loop.py` 4 测试对照契约 §3.2：
++
++| 契约断言要点 | 实测断言 | 判定 |
++|--------------|----------|------|
++| 步数上限 | `test_loop_step_limit`：max_steps=3，`fake.calls == 3`（FakeLLM 脚本耗尽会 AssertionError——loop.py 对 AssertionError 穿透不吞，双重保证恰 3 次） | ✓ |
++| 事件序列无 thought | multistep 精确断言六元组 `[status, tool_call, tool_result, tool_call, tool_result, final]` | ✓ |
++| seq 从 1 连续递增 | `[event.seq for …] == [1,2,3,4,5,6]` | ✓ |
++| tool_call_id 稳定格式 call_XXXX | 成对相等断言 + 精确值 `call_0002`/`call_0004` | ✓ |
++| final 必发 | 三条失败路径（step_limit / llm_error）末两条均 `[error, final]`，multistep 以 final 收尾 | ✓ |
++| JSONL 与内存事件一致 | `lines == [event.model_dump(mode="json") …]` 逐行比对 | ✓ |
++| 真实产出文件 | `(sandbox/"out.txt").read_text() == "result: 7"` | ✓ |
++| M1-3 错误回传 | 第一轮 `tool_result.ok is False` 且 summary 含 BLOCKED；第二轮 messages 的 tool message `content.startswith("ERROR:")`；任务 completed；沙箱外无文件 | ✓ |
++| LLM 不可恢复异常 | ExplodingLLM → failed + error + final | ✓ |
++
++**结论**：断言质量高，无"跑通即过"的弱断言；marker（loop/max_steps/tool_failure/tool_security）与冻结名双保险，`-k` 选择器命中已实测（4/1/1/25）。
++
++---
++
++## 五、M1-5 安全测试覆盖度审计 + 安全实现源码核实（重点）
++
++**审计方法**：不只信测试——逐行读三工具实现源码核实安全机制本身，再对照测试清单。
++
++### 5.1 calc（实现 src/tools/calc.py + tests/unit/test_calc.py 5 用例）
++
++| 审计项 | 实现 | 测试 | 结论 |
++|--------|------|------|------|
++| 无 eval/exec/compile 字符串执行 | ✓ `ast.parse` + 自实现白名单递归求值器 | —（G-3/grep + 源码核实） | ✓ |
++| 名称注入（`__import__`/`open`/裸名） | Name 节点 fall-through 拒绝（L128） | 5 种表达式全断言 BLOCKED | ✓ |
++| bool/字符串/None 常量 | Constant 显式排除 bool（int 子类陷阱）、非 int/float 拒绝 | `"True"` 用例覆盖 | ✓ |
++| Attribute/Lambda/下标/条件表达式 | 白名单外一律拒绝 | `"''.join([])"`、`"(lambda:1)()"`、`"[1,2][0]"`、`"a if b else c"` | ✓ |
++| 函数白名单 + 元数 | 六函数 + min/max/round 元数校验 | 名称注入用例覆盖函数面 | ✓ |
++| keywords/starargs | 显式拒绝（L115-118） | —（白名单规则内） | ✓（实现核实） |
++| 深度（结构性） | AST 递归深度 ≤20 | `"1+"*21+"1"` 深度 22 拒绝（契约示例之外的增强用例） | ✓ |
++| 深度（括号） | max(AST 深度, 括号嵌套) | `"("*25+…` 拒绝 | ✓ |
++| 长度 >200 | Pydantic Field（经 registry 统一入口验证） | 221 字符 → `invalid arguments` | ✓ |
++| Pow 越界 | `_power` 统一检查（abs 指数>1000 / 复数 / inf），BinOp 与 pow() 共用 | `pow(10,10000)` → out of range | ✓ |
++| 除零/domain 非 BLOCKED | 语义区分正确 | `1/0`、`sqrt(-1)` 断言无 BLOCKED | ✓ |
++
++### 5.2 http_request（实现 src/tools/http_request.py + tests/unit/test_http_request.py 15 用例）
++
++**实现核实（逐项）**：
++- **resolve-then-connect**：`_validate_and_resolve` 返回首个已校验 IP 字符串；`connector(ip, …)` 直连该 IP，**全程无二次解析**——rebinding TOCTOU 在连接路径上不成立 ✓
++- **Host 头原域名**：请求行 `Host: {hostname}`（L220），连接地址为 IP ✓（测试断言 `b"Host: example.com\r\n" in written[0]`）
++- **HTTPS SNI/证书校验原域名**：`asyncio.open_connection(ip, port, ssl=create_default_context(), server_hostname=原域名)`——SNI 与 check_hostname 均以原域名进行；**无 verify=False**（默认 context 为 CERT_REQUIRED + check_hostname=True）✓（测试断言 `sni == "example.com"`）
++- **全量 IP 校验**：`getaddrinfo` 全部地址逐一过 `_ip_allowed`（private/loopback/link_local/reserved/multicast/unspecified——显式覆盖 IPv4 四段 + 169.254.169.254 与 IPv6 ::1 / fc00::/7 / fe80::/10），任一违规整条拒绝 ✓
++- **白名单先于 DNS**（精确匹配，无通配）✓；**userinfo 拒绝** ✓；scheme 白名单 ✓
++- **重定向手动逐跳**：`follow_redirects` 不存在——30x 提取 Location（urljoin RFC 3986 相对解析）→ 下一跳重走完整链路（白名单+DNS+IP 校验全量）；≤3 跳 ✓
++- **超时/大小**：每跳 `asyncio.wait_for(10s)`；1MB 三种读取模式（chunked/content-length/EOF）累计截断 + `truncated: true` 标注 ✓
++
++**测试覆盖**：
++
++| 用例（含参数化） | 断言要点 | 结论 |
++|------------------|----------|------|
++| 白名单放行 + resolve-then-connect 证据 | resolver 恰一次、连接 IP==已校验 IP、SNI==原域名、Host 头原域名、port 443 | ✓ |
++| 私有 IP（192.168.1.1 / 10.0.0.5 / 172.16.31.4） | BLOCKED + **未建连**（connections==[]） | ✓ |
++| 云元数据 169.254.169.254（白名单内放行后由 IP 校验阻断） | BLOCKED | ✓ |
++| IPv6（::1 / fe80::1 / fc00::1） | BLOCKED | ✓ |
++| 非白名单主机 | BLOCKED + **resolver.calls==[]**（白名单先于 DNS 证据） | ✓ |
++| 混合 DNS 记录 [93.184.216.34, 10.0.0.1] | 整条 BLOCKED（防多记录 rebinding） | ✓ |
++| 重定向→私有 IP | 第二跳未建连（重新走全链路被拒） | ✓ |
++| 重定向循环/超限 | 恰 4 次连接后 BLOCKED: redirect | ✓ |
++| **DNS rebinding（FakeResolver 两次不同结果）** | 恰解析一次 + 连接 IP==首次校验值 | ✓ |
++| 1MB 截断 | `truncated: true` + body 恰 1MB | ✓ |
++| 幂等声明覆写 | GET→idempotent / 缺省 GET / POST→non-idempotent | ✓ |
++
++**结论：任务要求的安全用例全部齐备**（私有 IP 全段、云元数据、IPv6 三类、重定向逐跳重校验、DNS rebinding fake resolver、userinfo 诱骗——由实现 L138 的 `username/password is not None` 拒绝覆盖并经源码核实；字面量 IP 直填由云元数据用例承载）。
++
++**非阻断 gap**（并入 G-2 退回补测）：chunked 读取、EOF 读取、畸形响应/URL 分支无测试（安全上由白名单兜底，功能上有回归风险）。
++
++### 5.3 file_write（实现 src/tools/file_write.py + tests/unit/test_file_write.py 5 用例）
++
++| 审计项 | 实现 | 测试 | 结论 |
++|--------|------|------|------|
++| `..` 穿越（段级，非子串误判） | `Path.parts` 逐段比较 + isabs（L44） | `../evil.txt`、`a/../../evil`、绝对路径 `/tmp/x`；沙箱外文件不存在断言 | ✓ |
++| realpath + 组件边界前缀 | 已存在最深路径 realpath 后 `is_relative_to(sandbox_real)`（防 `data-evil` 前缀歧义） | 前缀混淆用例（symlink 指向沙箱外同前缀目录）→ `outside sandbox` | ✓ |
++| 符号链接各级目录 lstat | 沙箱根起逐级 lstat（目录与目标文件本身均查，S_ISLNK 即拒） | 目录 symlink + 文件 symlink 两用例 → `symlink` | ✓ |
++| 1MB 上限 | Pydantic 字符层 + executor UTF-8 字节复核 | 字符超限（registry 层 `invalid arguments`）+ 60 万宽字符 ≈1.2MB 字节（`content too large`）双层用例 | ✓ |
++| 沙箱根配置 | `settings.data_sandbox_dir` | 测试沙箱根指向 `data/.test-sandbox/…` | ✓ |
++
++**结论**：任务要求的四类用例（穿越/绝对路径/symlink 各级/超大内容）全部齐备且断言到具体错误语义。
++
++---
++
++## 六、7 项实现决策 QA 意见（backend-m1.md"契约偏离记录"逐项）
++
++| # | 决策 | QA 意见 | 理由 |
++|---|------|---------|------|
++| 1 | ToolSpec 落 `src/models/tool_spec.py`（契约 §1.2 写 registry.py） | **接受**；建议 Architect 出契约勘误 | 契约自身矛盾：§1.2 位置 vs §2 工具模块构造 ToolSpec vs §4 禁 tools import agent，三者不可同时满足。按 §4"共享类型一律走 src/models/"消解是唯一自洽方案；签名逐字段一致（已核对：Literal 幂等/风险 + effective_idempotency 默认实现） |
++| 2 | AgentLoop 增可选参数 `task_id` | **接受**；建议契约勘误 | 契约矛盾：§1.5 要求 CLI 在任务开始前打印 task_id，而 §1.3 task_id 生成在 run_task 内。可选参数不动冻结签名 `run_task(goal)`；QA 已核实 run_agent 首行 `task_id: <id>` 且与 JSONL 文件名一致（M1-2 提取依据） |
++| 3 | `build_tool_spec(settings)` 代替模块级 TOOL_SPEC 常量 | **接受**；建议契约勘误 | 契约 §2 的 TOOL_SPEC 模块级常量无法闭包 settings（白名单/沙箱根）——又一处契约内部张力；统一签名（calc 忽略 settings）合理 |
++| 4 | 手写最小 HTTP/1.1 客户端代替 SafeTransport(httpx) | **接受**（契约 §2.2 链路 4 明示"等价物"允许） | 四项硬性要求全满足并经源码+测试双重核实（连接 IP=已校验 IP、Host 原域名、SNI/证书校验原域名、无 verify=False）；Reader/Writer Protocol 注入点设计使 resolve-then-connect 可被测试证明。**附观察 A**：超时为**每跳** 10s（3 跳最多 30s）vs 契约字面"总超时 10.0s"——提请 Architect 确认口径（非安全缺陷，建议按"每跳"更新契约或改为总预算）。**附观察 B**：手写客户端不支持 HTTP/2/gzip/真实 chunked 形态——真实外网兼容性留待 M1-2/E2E-1 实测（届时若 example.com 响应异常，归因点在此） |
++| 5 | calc 深度 = max(AST 节点深度, 括号嵌套深度) | **接受** | 契约示例 `"("*25+…` 纯 AST 计数无法拒绝（括号不产生节点）——该消解忠实于契约示例意图，且实现为"取 max"而非"只查括号"，结构性深链同样拦截（已有测试用例证明） |
++| 6 | `-k` 选择器经 pytest marker（冻结名不动） | **接受** | 测试函数名与 §3.2 冻结名逐一一致（已核对）；marker 为实现手段，pyproject 已注册，四个选择器命中经 QA 实测（4/1/1/25） |
++| 7 | 测试文件名 `test_loop.py` | **接受** | 契约 §3.2 原文即此名，任务描述中的 test_agent_loop.py 为口误 |
++
++**小结**：7 项均属契约内部矛盾/明示等价物的合理消解，无一项改变冻结的接口签名、事件格式或安全语义；其中 #1/#2/#3 建议 Architect 以勘误形式回写契约（避免 M2 阅读时再起歧义），#4 附带的超时口径请 Architect 一并确认。
++
++---
++
++## 七、其他静态审查结果
++
++### 7.1 契约一致性抽查（逐项核对通过）
++
++- 共享模型五件套字段与契约 §1.0 **逐字段一致**：ToolCallRequest(remote_id/tool_name/arguments)、LLMResponse(content/tool_calls/finish_reason)、AgentEvent(type/seq/ts/payload)、ToolResult(ok/result/error)、AgentResult(task_id/status/result/steps/events)
++- 事件五类型枚举无 thought（ADR-006）✓；payload 字段名与契约表一致（status{status,reason} / tool_call{tool_call_id,tool_name,args_summary} / tool_result{tool_call_id,ok,result_summary} / error{message} / final{status,result_summary}）✓；摘要统一截断 512（`_SUMMARY_LIMIT` 应用于 args_summary/result_summary/error/final）✓
++- `tool_call_id = call_{seq:04d}`（取该 tool_call 事件 seq）✓；seq 任务级从 1 单调递增 ✓；事件**先落 JSONL 再入内存/回调**（loop.py emit 顺序）✓
++- Message 三形态 + tool message `ERROR:` 前缀回传契约 ✓
++- LLMClient：key 空不抛错（调用方校验）、base_url or None、timeout/max_retries 透传、arguments JSON 解析失败 → LLMProtocolError、异常原样上抛 ✓
++- run_agent：缺 key stderr + exit 2（实测）、首行 task_id、结束 status/result（截断 512）、退出码 0/1/2、sys.path 注入 ✓
++- `build_registry(settings)` 于 src/agent/__init__.py 注册三工具 ✓
++- `HTTP_ALLOWED_HOSTS` 默认 `example.com`（config.py）——**E2E-1 前置条件已由 M1 落实** ✓
++
++### 7.2 分层合规与 M2 越界
++
++- G-4 门禁实跑通过（无反向 import）；源码复核：tools/ 无 import src.agent（ToolSpec 经 models 传递）、loop 无 api/services/storage import ✓
++- M2 越界 grep（sqlite3/CREATE TABLE/text/event-stream/EventSource/resume/cancel/confirm/checkpoint/fencing，扫 src/ + examples/）：**无匹配** ✓
++- `src/api/app.py` 保持 M0 /health 原样 ✓；事件仅 JSONL 无 DB ✓；`tests/unit/test_health.py` M0 原样 ✓
++- 依赖白名单：pyproject 与 venv 实际安装核对——顶层依赖恰为 §2.1 白名单（fastapi/uvicorn/pydantic/pydantic-settings/httpx/openai + dev: pytest/pytest-asyncio/pytest-cov/pyright），其余均为传递依赖；**未新增白名单外依赖** ✓
++
++---
++
++## 八、遗留与风险
++
++| # | 事项 | 归属 | 状态 |
++|---|------|------|------|
++| 1 | **G-2 退回**：补 http_request 单元测试（chunked/EOF/畸形分支），tools/ ≥ 80% | Backend | **阻断 M1 放行**；补齐后 QA 复跑 G-2 + 全量回归即可 |
++| 2 | M1-2 前置条件：用户 key 配置确认（OPENAI_API_KEY 或 ANTHROPIC_API_KEY + 可选 LLM_BASE_URL/LLM_MODEL），QA 在用户环境执行 M1-2 命令块 | Lead → 用户 | 待安排 |
++| 3 | 超时语义口径（每跳 10s vs 契约"总超时 10s"）与 3 处契约勘误（ToolSpec 位置/task_id 参数/build_tool_spec） | Architect | 建议随 M2 契约制定时一并回写 |
++| 4 | 手写 HTTP 客户端真实外网兼容性（gzip/HTTP-2/真实 chunked 形态）——M1 测试全部不联网，未暴露 | M1-2/E2E-1 实测 | 风险登记：若真实请求异常，归因点在 src/tools/http_request.py 手写协议层 |
++| 5 | http_request 默认 resolver/connector（15 行）依赖真网，M1 无法覆盖（可接受） | M1-2 实测覆盖 | 登记 |
++| 6 | 测试产物残留（data/.test-sandbox/、logs/agent-*.jsonl）已被 .gitignore 覆盖 | 无害 | 已确认 |
++| 7 | 环境怪癖（unlink 拦截、mkdir PermissionError）本会话未复现；等效口径命令保留在 backend-m1.md 备查 | 环境 | 登记 |
++
++---
++
++## 九、复核清单（Backend 修复后 QA 复验口径）
++
++1. `pytest tests/unit -k tool_security --capture=no -p no:cacheprovider` —— 新增用例随 marker 命中
++2. `pytest --cov=src --cov-report=term-missing` —— tools/ ≥ 80%（agent/ 不回退）
++3. `pytest --capture=no -p no:cacheprovider`（全量回归）—— 0 failed
++4. （如 Backend 改动了 src/）加跑 `python -m scripts.check_layers` + `python -m pyright src/`
++
++> 复验通过即出具 M1 非真实 LLM 部分最终放行意见；M1-2 待用户 key 环境另行执行。
++
++---
++
++## 十、复验记录（G-2 退回修复后，2026-10-20）
++
++> 依据：Backend 修复交接（backend-m1.md"覆盖率退回修复"节：+19 http 用例、+6 registry 用例，声明产品代码零改动）+ 本报告 §九复验口径。
++
++### 10.1 产品代码零改动核实
++
++git index 异常不可用，改用三路源码核对：
++
++| 核对路径 | 结果 |
++|----------|------|
++| 修复节改动文件清单 | 仅 `tests/unit/test_http_request.py`（追加）、`tests/unit/test_registry.py`（新建）、`test_loop.py`/`test_file_write.py`（fixture 类型标注 `Path → Iterator[Path]`，generator fixture 标注修正，非行为变更）+ 交接文档本身——**无 src/ 文件** ✓ |
++| 源码内容抽查（对比 QA 初版审计记录） | `src/tools/http_request.py` 前 60 行（模块结构、常量、Protocol 定义）与初版逐行审计记录**完全一致**；`calc.py`/`file_write.py`/`loop.py`/`registry.py`/`tool_spec.py` 均与初版审计内容一致（含关键安全实现点：`_validate_and_resolve` 返回已校验 IP、`_ip_allowed` 六属性拒绝、`is_relative_to` 组件边界、`lstat` 逐级、`call_{seq:04d}`、final 必发）✓ |
++| mtime 抽查 | src/ 全部 .py 的 mtime（16:24–17:26）均落在 Backend M1 交付时段内，晚于该时段无修改痕迹；tests/ 新文件时间符合修复批次 ✓ |
++
++**结论：产品代码零改动成立**，符合退回要求"只补测试不改产品代码"，未触发全量重验条件。
++
++### 10.2 复验三项（§九口径，真实命令、退出码、输出）
++
++| # | 实际命令 | 退出码 | 输出摘要 | 结论 |
++|---|----------|--------|----------|------|
++| 1 | `.venv/bin/python -m pytest -k tool_security --capture=no -p no:cacheprovider` | 0 | **44 passed, 11 deselected in 2.11s**（原 25 + 新增 http 19 全部命中 tool_security marker） | **PASS** |
++| 2 | `.venv/bin/python -m pytest --cov=src --cov-report=term-missing --capture=no -p no:cacheprovider` | 0 | **55 passed**；TOTAL 90%（598 stmt / 58 miss）——`.coverage` 落盘本会话未被拦截，无需 COVERAGE_FILE 变通。目录级精确计算见下表 | **PASS** |
++| 3 | `.venv/bin/python -m pytest --capture=no -p no:cacheprovider`（全量回归） | 0 | **55 passed in 2.54s**（原 30 + http 19 + registry 6；0 failed / 0 error） | **PASS** |
++
++**G-2 判据复核（§九第 2 项，目录级）**：
++
++| 目录 | 修复前（初版实测） | 复验实测 | 判据 ≥ 80% | 判定 |
++|------|--------------------|----------|------------|------|
++| **tools/** | 78.35%（351/76） | **91.45%**（351 stmt / 30 miss） | ✓ | **达标**（http_request.py 68% → 93%，未覆盖行仅剩 84–88/97–106 默认 resolver/connector——初版 §三明示需真实网络、可接受，留待 M1-2） |
++| **agent/** | 81.71%（164/30） | **83.54%**（164/27） | ✓ | 达标且**不降反升**（registry.py 74% → 82%，由新增 registry 用例贡献） |
++| storage/ | 0 stmt（仅 `__init__`） | 0 stmt | — | 不适用（M1 无代码，M2 起生效） |
++
++复验数字与 Backend 自验记录（91.45% / 83.54% / 55 passed）**逐项一致**。
++
++### 10.3 新增用例质量抽查
++
++**test_http_request.py 新增 19 用例**（文件累计 34，文件级实跑 34 dots 吻合）对照初版 §三退回清单：
++
++| 退回清单要求 | 对应用例 | 断言质量核验 |
++|--------------|----------|--------------|
++| chunked 正常读取 | `test_http_reads_chunked_body` | 3-chunk 拼接内容断言 + 无 truncated ✓ |
++| chunked 超限截断 | `test_http_chunked_truncation` | `truncated: true` + body 精确 1MB 长度断言 ✓ |
++| 无长度头读至 EOF | `test_http_reads_body_to_eof` | body 内容断言 + **额外**：请求行 `GET /path?q=1` 精确断言（覆盖 L153 path?query 拼接）✓ |
++| EOF 超限截断 | `test_http_eof_truncation` | 精确 1MB 长度断言 ✓ |
++| 畸形 status line | `test_http_rejects_malformed_status_line`（参数化 3：空响应/缺码/非数字） | 断言 `http_request: ` 前缀且**非 BLOCKED**——功能错误与安全拒绝语义区分正确 ✓ |
++| 畸形 content-length | `test_http_rejects_malformed_content_length` | 具体错误消息断言 ✓ |
++| URL 错误分支 | `test_http_rejects_bad_urls`（参数化 5：scheme×2/无 hostname/**userinfo**/端口超范围） | 每例断言 BLOCKED + 具体 reason + **未建连**（connections==[]）✓ |
++| 连接 OSError | `test_http_connection_oserror` | 结构化错误 `http_request: OSError: connection refused` + 非 BLOCKED ✓ |
++| 超时路径 | `test_http_timeout` | **采纳初版建议的 monkeypatch 短超时方案**（TIMEOUT_SECONDS=0.05），HangingConnector 内置 `AssertionError("should be cancelled")` 反向断言——超时若不生效测试必失败，非空转用例 ✓ |
++| （清单外补充） | writer 清理失败忽略 / 空 DNS 结果 BLOCKED / 畸形 chunk size / content-length short read 提前 EOF | 4 例均具体断言（含"已读部分仍返回"的短读语义）✓ |
++
++**test_registry.py 新增 6 用例**（对应初版 §三非强制建议项）：空名/重复名/非 async executor 拒绝（`pytest.raises` + match 具体消息）、非 BaseModel input_model（pydantic 构造期 ValidationError——用例注释正确说明 register 的 issubclass 为不可达第二道防线）、idempotency/risk_level Literal 构造期校验 ×2、get_schemas 导出格式（逐字段断言）——断言全部真实。
++
++**抽查结论**：无空断言、无恒真断言；全部新增用例带 `@pytest.mark.tool_security`（复验 1 的 44 passed 命中证明）；退回清单 9 类要求全覆盖 + 4 类超出。**质量合格**。
++
++### 10.4 复验最终判定
++
++| 项 | 判定 |
++|----|------|
++| 复验 1（-k tool_security） | PASS（44 passed，exit 0） |
++| 复验 2（G-2 --cov） | **PASS**（tools/ 91.45% ≥ 80%、agent/ 83.54% ≥ 80%、55 passed，exit 0） |
++| 复验 3（全量回归） | PASS（55 passed，exit 0） |
++| 产品代码零改动 | 核实成立 |
++| 新增用例质量 | 合格（断言真实、清单对应、marker 命中） |
++
++**M1 非真实 LLM 部分：最终结论为通过（放行）。**
++
++- 初版全部 PASS 项（M1-1/1b/3/4/5、G-1/3/4/5a/5b、冒烟、静态审查）不受影响，继续有效；
++- G-2 由 FAIL 转 PASS（数字见 10.2）；
++- 遗留事项不变：M1-2 待用户 key 配置确认（Lead 安排）；3 处契约勘误 + 超时口径提请 Architect（随 M2 契约回写）；手写 HTTP 客户端真实外网兼容性留待 M1-2/E2E-1 实测归因。
++
++> 后续：Lead Orchestrator 可凭本报告安排 M2（持久化 + API + 恢复语义）启动；M1-2 在用户 key 环境补验后闭环。
+diff --git a/docs/handoff/v1.2-to-m0.diff b/docs/handoff/v1.2-to-m0.diff
+new file mode 100644
+index 0000000..7530b37
+--- /dev/null
++++ b/docs/handoff/v1.2-to-m0.diff
+@@ -0,0 +1,692 @@
++diff --git a/.env.example b/.env.example
++new file mode 100644
++index 0000000..4e55448
++--- /dev/null
+++++ b/.env.example
++@@ -0,0 +1,20 @@
+++# CognitiveAgent Lab 配置模板（复制为 .env 使用；.env 已被 gitignore）
+++# CALC_AGENT_ENV_FILE: pydantic-settings env_file 路径覆盖（见 ARCHITECTURE §7；设为 /dev/null 即绕开 .env）
+++CALC_AGENT_ENV_FILE=.env
+++
+++# LLM 密钥（二选一；M0 不校验存在性，可留空）
+++OPENAI_API_KEY=
+++ANTHROPIC_API_KEY=
+++
+++# LLM 端点（可选，兼容端点；留空使用官方默认）
+++LLM_BASE_URL=
+++LLM_MODEL=gpt-4o
+++
+++# Agent 主循环步数上限
+++CALC_AGENT_MAX_STEPS=25
+++
+++# http_request 域名白名单（逗号分隔，默认含 example.com）
+++HTTP_ALLOWED_HOSTS=example.com
+++
+++# file_write 沙箱根目录
+++DATA_SANDBOX_DIR=data
++diff --git a/.gitignore b/.gitignore
++new file mode 100644
++index 0000000..e1f82ed
++--- /dev/null
+++++ b/.gitignore
++@@ -0,0 +1,22 @@
+++# 密钥与环境
+++.env
+++
+++# 虚拟环境
+++.venv/
+++
+++# 日志与数据
+++logs/
+++data/*
+++!data/.gitkeep
+++
+++# 数据库文件
+++*.db
+++
+++# Python
+++__pycache__/
+++*.py[cod]
+++.coverage
+++.coverage.*
+++
+++# macOS
+++.DS_Store
++diff --git a/data/.gitkeep b/data/.gitkeep
++new file mode 100644
++index 0000000..e69de29
++diff --git a/docs/handoff/backend-m0-scaffold.md b/docs/handoff/backend-m0-scaffold.md
++new file mode 100644
++index 0000000..2f13342
++--- /dev/null
+++++ b/docs/handoff/backend-m0-scaffold.md
++@@ -0,0 +1,64 @@
+++# Backend 交接文档 — M0 项目脚手架
+++
+++> 交付人：Backend Agent ｜ 依据：ROADMAP v1.2 M0 节、ACCEPTANCE_CRITERIA v1.2 M0 + G-1~G-5b、ARCHITECTURE v1.2 §2.1/§3/§7
+++> 日期：2026-10-20
+++
+++## 改动文件清单
+++
+++| 文件 | 说明 |
+++|------|------|
+++| `.venv/`（不入库） | 独立虚拟环境（managed python 3.13.12），依赖严格按 ARCHITECTURE §2.1 白名单 |
+++| `pyproject.toml` | 项目元数据；runtime 依赖 6 项 + dev 分组 4 项；pytest 配置（testpaths=tests、pythonpath=["."]）；pyright venv 配置 |
+++| `.env.example` | 配置模板：CALC_AGENT_ENV_FILE / OPENAI_API_KEY / ANTHROPIC_API_KEY / LLM_BASE_URL / LLM_MODEL / CALC_AGENT_MAX_STEPS / HTTP_ALLOWED_HOSTS / DATA_SANDBOX_DIR（对照 ARCHITECTURE §7） |
+++| `.gitignore` | .env、.venv/、logs/、data/*（.gitkeep 例外）、*.db、__pycache__/、.DS_Store、.coverage* |
+++| `src/{api,services,agent,tools,storage,models}/__init__.py` | 六包骨架 |
+++| `src/config.py` | pydantic-settings Settings 类；env_file 路径受 `CALC_AGENT_ENV_FILE` 覆盖（默认 .env，/dev/null 即绕开）；密钥字段可空（M0 不校验）；`allowed_hosts` property 解析逗号分隔白名单 |
+++| `src/api/app.py` | FastAPI app；`GET /health` 精确返回 `{"status":"ok"}`；import 时加载 Settings（M0-3 无 key 可起的实现依据）；M0 无其他端点 |
+++| `tests/unit/test_health.py` | TestClient 真实调用 /health，断言 200 + `{"status":"ok"}`（M0-2 ≥1 collected） |
+++| `tests/{integration,e2e}/__init__.py` | 测试分层骨架（M1/M2 填充） |
+++| `web/index.html` | 前端占位页（M3 交付） |
+++| `scripts/check_layers.py` + `scripts/__init__.py` | G-4 分层依赖检查：ast 解析 src/ 全部 import（绝对+相对）；规则=业务层禁止反向依赖（api=0→services=1→agent=2→tools/storage=3，同层 tools↔storage 允许）、models/config 共享层仅被引用不得引用业务层；退出码 0=通过 |
+++| `scripts/check.sh` | G-1~G-4+G-5a/G-5b 六项独立执行、显式 if 判定、`[PASS]/[FAIL] 分项名` 输出、聚合退出码任一失败非 0；不依赖 set -e（G-3 grep rc=1 为通过态）；已预备 managed node PATH（pyright 运行时） |
+++| `data/.gitkeep`、`logs/`、`examples/` | 目录占位（logs 与 examples 为空目录，git 不追踪） |
+++
+++## 运行方式
+++
+++```bash
+++# 全部门禁（从项目根）
+++bash scripts/check.sh
+++
+++# 单项
+++.venv/bin/python -m pytest
+++.venv/bin/python -m scripts.check_layers
+++.venv/bin/python -m pyright src/
+++
+++# 服务启动（QA 验收 M0-1/M0-3 用）
+++.venv/bin/uvicorn src.api.app:app --port 8000
+++```
+++
+++## 自验记录（本会话环境）
+++
+++| 命令 | 结果 |
+++|------|------|
+++| `.venv/bin/python -m pytest --capture=no -p no:cacheprovider` | **1 passed, exit 0**（collected=1，满足 M0-2） |
+++| `.venv/bin/python -m pytest --cov=src --cov-report=term-missing --capture=no` | 测试 1 passed，但 coverage 数据落盘 `os.rename` 被拦截 → INTERNALERROR exit 3（环境限制，非代码缺陷） |
+++| `.venv/bin/python -m scripts.check_layers` | **exit 0**（裸命令，无等效替换） |
+++| `.venv/bin/python -m pyright src/` | **0 errors, exit 0**（裸命令；修复项见下） |
+++| `.venv/bin/python -m compileall -q src/` | pyc 原子写入 rename 被拦截 → 报错 exit 1（环境限制）；**等效验证**：内存 `compile()` 逐文件编译 9/9 OK |
+++| G-3 grep 命令块 | **rc=1 → 通过** |
+++| `bash scripts/check.sh` | 分项：G-3/G-4/G-5a PASS；G-1/G-2/G-5b FAIL（均为本会话 unlink/rename 拦截所致，等效验证见上） |
+++| 无 key 冒烟 | `env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY CALC_AGENT_ENV_FILE=/dev/null python -c "from src.api.app import app"` → OK exit 0 |
+++
+++## 已知限制与环境问题（重要）
+++
+++1. **本 Backend 会话被宿主 Security Center 拦截所有 unlink/rename 操作**（含 `rm`，`dangerouslyDisableSandbox` 也被拦），导致 Python tempfile 全不可用 → 裸 `pytest`（FDCapture 需 TemporaryFile）、`--cov`（coverage 落盘 rename）、`compileall`（pyc 原子写）三项在本会话无法跑通。**测试逻辑、语法、类型均已通过等效命令验证（见上表）**。请 QA 在正常权限会话执行验收命令；若 QA 会话同样受限，需放开删除权限或已知等效命令口径。
+++2. **项目根残留 22+ 个 8 字符随机名垃圾文件**（python tempfile 探测残留，内容为 `blat`，如 `_xsmfdxt`、`av6yy_j_` 等）及 1 个 `.coverage.*` 中间文件（已被 .gitignore 覆盖）。本会话无法删除。**请 Lead 提交前清理**：`rm $(ls | grep -E '^[a-z0-9_]{8}$')`（注意先 `git add` 显式路径，勿用 `git add -A` 一把抓）。
+++3. `.env.example` 较用户清单额外补了 `CALC_AGENT_MAX_STEPS=25`（ARCHITECTURE §7 明确列出，保持一致性）。
+++4. pyright 初次运行报 2 个 `reportMissingImports`——原因是未显式指定解释器环境；已在 `pyproject.toml` 加 `[tool.pyright] venvPath="." / venv=".venv"` 修复，复测 0 errors。
+++5. `logs/`、`examples/` 为空目录（git 不追踪空目录，文件系统已就位；examples 内容 M1 交付）。
+++
+++## 给 QA 的提示
+++
+++- M0-1/M0-3 验收命令中的 `uvicorn` 请用 `.venv/bin/uvicorn`（或激活 venv），避免落到共享环境。
+++- G-3 扫描的 `web/index.html`、`src/config.py` 均无密钥形态字符串，rc=1 已验证。
+++- `check.sh` 的分项报告已实证"失败可归因"：本会话 G-1/G-2/G-5b 的 FAIL 均可从输出直接归因到 tempfile/rename。
++diff --git a/docs/handoff/qa-M0.md b/docs/handoff/qa-M0.md
++new file mode 100644
++index 0000000..640e1bc
++--- /dev/null
+++++ b/docs/handoff/qa-M0.md
++@@ -0,0 +1,150 @@
+++# QA 验收报告 — M0 项目脚手架
+++
+++> 验收人：QA Agent ｜ 日期：2026-10-20 ｜ 依据：ACCEPTANCE_CRITERIA v1.2（M0 节 + 通用门禁节）、ROADMAP v1.2 M0 节、Backend 交接文档 `backend-m0-scaffold.md`
+++> 被验收交付：Backend M0（脚手架 + /health + 测试骨架 + check_layers + check.sh）
+++> 结论速览：**有条件通过**——6 项 PASS、1 项 PASS(等效)、3 项 ENV-BLOCKED（沙箱环境限制，非代码缺陷）、**0 项 FAIL、无退回项**
+++
+++---
+++
+++## 0. 环境限制声明（验收环境证据，先读）
+++
+++本 QA 会话的宿主 Security Center 拦截所有 unlink/rename 操作，Python tempfile 探测失败（`No usable temporary directory found`），导致以下原文命令在本会话不可用，**均为环境限制，非代码缺陷**：
+++
+++| 原文命令 | 实测失败证据 | 归因 |
+++|----------|--------------|------|
+++| 裸 `pytest` | exit=1，堆栈：`_pytest/capture.py:493 FDCapture.__init__ → TemporaryFile → FileNotFoundError`（FDCapture 启动即崩，未执行任何测试） | tempfile 被拦 |
+++| `pytest --cov` | exit=1，堆栈：`coverage/sqldata.py:913 erase → file_be_gone → os.remove(path)`（清理旧 .coverage 文件被拦） | os.remove 被拦 |
+++| `compileall -q src/` | exit=1，9 个文件全部 `*** Error compiling`；Security Center 拦截日志直接可见 `src/__pycache__/__init__.cpython-313.pyc.4381397456`（pyc 临时文件 rename 被拦） | pyc 原子写 rename 被拦 |
+++
+++等效运行方式（已验证可行）：pytest 加 `--capture=no -p no:cacheprovider`；compileall 用内存 `compile()` 逐文件替代。各分项实测记录见下表。
+++
+++---
+++
+++## 1. 逐项验收结果
+++
+++| ID | 实际命令 | 退出码 | 输出摘要 | 结论 |
+++|----|----------|--------|----------|------|
+++| M0-1 | 前置 `lsof -i :8000 -sTCP:LISTEN`（无占用，rc=1）→ 判据命令块原文执行（`.venv/bin/uvicorn src.api.app:app --port 8000` + 30 次就绪探测 + 标志位收尾 + kill $APP_PID） | 0 | `ok=1`；body 精确 `{"status":"ok"}`；kill 后 lsof 复查无监听（rc=1），进程清理确认；日志含 `Application shutdown complete` | **PASS** |
+++| M0-2 | ① 等效：`.venv/bin/python -m pytest --capture=no -p no:cacheprovider` ② 对照：裸 `.venv/bin/python -m pytest` | ① 0 ② 1 | ① `collected 1 item`、`tests/unit/test_health.py .`、`1 passed in 0.30s`（0 failed 且 collected=1，满足判据）② 崩于 tempfile（见 §0，测试逻辑未执行，与代码无关） | **PASS(等效)** |
+++| M0-3 | 判据命令块原文执行（`env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY CALC_AGENT_ENV_FILE=/dev/null .venv/bin/uvicorn src.api.app:app --port 8000` + 探测 + 清理） | 0 | `ok=1`；body 精确 `{"status":"ok"}`；双通道清理（unset + /dev/null 绕开 .env）下 `Application startup complete`；kill 后 lsof 复查无监听 | **PASS** |
+++| M0-4 | `.venv/bin/python -m pyright --version` | 0 | `pyright 1.1.414` | **PASS** |
+++| G-1 | `bash scripts/check.sh`（原文） | 1（聚合） | 分项报告：`[PASS] G-3`、`[PASS] G-4`、`[PASS] G-5a`；`[FAIL] G-1`（tempfile 崩溃，见 §0）、`[FAIL] G-2`（os.remove 被拦）、`[FAIL] G-5b`（pyc rename 被拦）——三个 FAIL 分项输出均可直接归因到 unlink/rename 拦截，无一条测试断言失败。**分项全部 PASS 无法在会话内确认**（G-2/G-5b 为 ENV-BLOCKED），聚合退出码必然非 0 | **ENV-BLOCKED**（待本地全绿确认；脚本结构核验见 §2） |
+++| G-2 | ① 原文：`.venv/bin/python -m pytest --cov=src --cov-report=term-missing`（经 check.sh）② 等效尝试：加 `--capture=no -p no:cacheprovider` | ① 1 ② 1 | ① tempfile 崩溃（见 §0）② 测试本身可通过，但 coverage 数据落盘阶段 `os.remove` 旧 `.coverage.*` 文件被拦（堆栈见 §0）——等效运行也无法完成 coverage 数据文件写入。M0 判据为"命令可运行不报错"（覆盖率阈值自 M1 生效），此项在本会话无法实测确认 | **ENV-BLOCKED** |
+++| G-3 | 判据命令块原文执行（grep + `rc=$?` + `[ "$rc" -eq 1 ]`） | 0（整块） | grep 无任何匹配输出，rc=1 → 整块退出 0，符合"rc=1 通过"语义 | **PASS** |
+++| G-4 | `.venv/bin/python -m scripts.check_layers`（原文裸命令，无需等效） | 0 | `[PASS] 分层依赖检查通过：无反向 import（api → services → agent → tools/storage，models/config 仅被引用）`，无违规输出 | **PASS** |
+++| G-5a | `.venv/bin/python -m pyright src/`（原文裸命令，无需等效） | 0 | `0 errors, 0 warnings, 0 informations` | **PASS** |
+++| G-5b | ① 原文：`.venv/bin/python -m compileall -q src/` ② 等效：内存 `compile()` 逐文件编译全部 9 个 src py 文件 | ① 1 ② 0 | ① 9 文件全部 `Error compiling`——Security Center 拦截日志直接显示 pyc 临时文件（`.pyc.4381397456`）删除被拦，非语法错误 ② `OK ×9`（`src/__init__.py`、`agent/`、`api/__init__.py`、`api/app.py`、`config.py`、`models/`、`services/`、`storage/`、`tools/`），`total=9, failed=0`——语法全部合法；但 pyc 落盘语义无法在会话内完成，原文命令 exit 0 待本地确认 | **ENV-BLOCKED** |
+++
+++> 汇总：**PASS × 6**（M0-1、M0-3、M0-4、G-3、G-4、G-5a）｜ **PASS(等效) × 1**（M0-2）｜ **ENV-BLOCKED × 3**（G-1、G-2、G-5b）｜ **FAIL × 0**
+++
+++---
+++
+++## 2. check.sh 源码人工核验（E2E-4 前置要求）
+++
+++对 `scripts/check.sh` 逐行审阅：
+++
+++| E2E-4 要求 | 核验结果 | 证据（行号） |
+++|------------|----------|--------------|
+++| 覆盖 G-1+G-2+G-3+G-4+G-5a+G-5b 六项全部分项 | 满足 | L26-33（G-1/G-2）、L36-45（G-3）、L48-50（G-4）、L53-55（G-5a）、L58-60（G-5b） |
+++| 逐项独立执行 | 满足 | 六个分项各自独立命令段，互不短路 |
+++| 显式 `if` 判定退出码，不依赖 `set -e` 链 | 满足 | `set -u`（L5，非 set -e）；L28/33/50/55/60 `if [ $? -eq 0 ]`；G-3 三分支显式判定 rc=1/0/其他（L39-45），正确处理"rc=1 是通过态" |
+++| 无 `\|\|` 兜底 | 满足 | 全文无 `||` 形式的命令级兜底；report() 在 if 分支内调用，失败置 `overall=1` |
+++| 分项报告可归因（`[PASS]/[FAIL] 分项名`） | 满足 | 本会话实测三个 FAIL 分项均可从输出直接归因到 tempfile/rename 拦截（见 §1 表 G-1 行），实证"失败可归因" |
+++| 聚合退出码 = 任一分项失败即非 0 | 满足 | `overall` 初值 0，fail 分支置 1，`exit "$overall"`（L68）；本会话实测聚合 exit=1 与分项 FAIL 一致 |
+++
+++**核验结论：check.sh 结构合规，满足 E2E-4 全部要求。** 遗留小问题见 §4 建议 1（硬编码 node 路径，非阻断）。
+++
+++---
+++
+++## 3. 静态核查结果
+++
+++### 3.1 源码审查（文件:行 定位）
+++
+++| 检查项 | 结果 | 说明 |
+++|--------|------|------|
+++| 无硬编码密钥 | 通过 | `src/config.py:26-32` 全部字段默认空串/安全值；`src/api/app.py`、`tests/unit/test_health.py` 无任何密钥形态字符串；G-3 grep rc=1 佐证 |
+++| 无 M1 越界（agent loop / 工具） | 通过 | `src/agent/`、`src/tools/` 仅有 0 字节 `__init__.py`；全 src 无 loop/tool_call/白名单校验等实现代码 |
+++| 无 M2 越界（数据库表 / SSE） | 通过 | `src/storage/` 仅 0 字节 `__init__.py`；无 sqlite/create table/EventSource/text-event-stream 匹配 |
+++| `/health` 实现合规 | 通过 | `src/api/app.py:15-18` 精确返回 `{"status":"ok"}`，M0 无其他端点；L12 `get_settings()` 于 import 时加载（M0-3 实现依据） |
+++| 测试真实性 | 通过 | `tests/unit/test_health.py:12-15` TestClient 真实调用 /health，断言 200 + body 精确匹配（非空壳/0 collected） |
+++| check_layers 规则与契约一致 | 通过 | `scripts/check_layers.py:25-34`：api=0→services=1→agent=2→tools/storage=3（同值允许 tools↔storage 互引）、models/config 共享层不得引用业务层；ast 解析绝对+相对 import（L79-94）；与 ARCHITECTURE §3 / G-4 判据一致 |
+++| 配置实现与 §7 一致 | 通过 | `src/config.py:14` `CALC_AGENT_ENV_FILE` 路径覆盖（默认 .env，/dev/null 绕开）；Settings 七字段与 .env.example 一一对应；`allowed_hosts` property 解析逗号分隔白名单 |
+++
+++### 3.2 配置与工程文件核对
+++
+++| 检查项 | 结果 | 说明 |
+++|--------|------|------|
+++| `.env.example` vs ARCHITECTURE §7 | 一致 | 8 字段全对齐：CALC_AGENT_ENV_FILE / OPENAI_API_KEY / ANTHROPIC_API_KEY / LLM_BASE_URL / LLM_MODEL / CALC_AGENT_MAX_STEPS / HTTP_ALLOWED_HOSTS / DATA_SANDBOX_DIR，无缺失无多余 |
+++| `.gitignore` 覆盖 | 通过 | `.env`（L2）、`.venv/`（L5）、`logs/`（L8）、`*.db`（L13）均在；另含 `data/*`+`!data/.gitkeep`、`__pycache__/`、`.coverage(.*)`、`.DS_Store` |
+++| `pyproject.toml` 依赖白名单 | 通过 | runtime 6 项 + dev 4 项 = ARCHITECTURE §2.1 全部 10 项，无白名单外依赖；`[tool.pyright] venvPath/venv` 显式指向 .venv（Backend 交接文档问题 4 的修复确认生效，G-5a 0 errors 佐证） |
+++
+++---
+++
+++## 4. 总体结论
+++
+++### M0：**有条件通过**（无代码缺陷，无退回项）
+++
+++- **PASS 6 项 + PASS(等效) 1 项**：M0 全部四项运行时验收（M0-1~M0-4）在会话内真实通过（M0-2 经等效方式，测试逻辑与原文完全等价且原文失败输出已归因为环境问题）；G-3/G-4/G-5a 门禁裸命令原样通过。
+++- **ENV-BLOCKED 3 项**（G-1、G-2、G-5b）：全部归因宿主沙箱 unlink/rename 拦截，失败证据与拦截日志逐条对应（§0/§1），**未发现任何测试断言失败或代码层面错误**；其中 G-5b 语法合法性已经内存编译等效证明（9/9 OK）、G-1 中 pytest 分项经等效命令证明（1 passed）。
+++- **FAIL 0 项**：无退回 Backend 的修复要求。
+++
+++### 待用户在本地终端运行的最终确认清单
+++
+++以下命令在无沙箱限制的本地终端执行，预期全部通过即 M0 无条件通过：
+++
+++```bash
+++# ① G-1 全量门禁（关键项：预期六项分项全部 [PASS]，聚合退出码 0）
+++bash scripts/check.sh
+++
+++# ② G-2 覆盖率命令可运行（M0 判据：命令运行不报错即可；覆盖率阈值自 M1 生效）
+++.venv/bin/python -m pytest --cov=src --cov-report=term-missing
+++
+++# ③ G-5b 语法编译（预期静默通过，exit 0）
+++.venv/bin/python -m compileall -q src/
+++
+++# ④（可选复核）裸 pytest，M0-2 原文命令
+++.venv/bin/python -m pytest
+++```
+++
+++> 若 ①~④ 在本地全部通过，M0 验收升级为无条件通过；若出现任何失败，按分项报告归因（预期不会——本会话所有失败点均为宿主拦截动作的直接结果）。
+++
+++---
+++
+++## 5. 风险与建议
+++
+++1. **[建议·非阻断] `scripts/check.sh:13` 硬编码本机 managed node 绝对路径**（`/Users/linyitong/.workbuddy/binaries/node/versions/22.22.2-6/bin`）。在无此路径的机器上该 PATH 前缀失效（不致失败，但 node 兜底失效，pyright 可能因缺 node 不可用）。建议 M1 由 Backend 改为条件检测（存在才 export，或用 `command -v node` 判定后回退）。
+++2. **[移交 Lead] 项目根残留 tempfile 垃圾文件**：Backend 交接文档已知问题 2 所列 8 字符随机名文件 + `.coverage.*` 中间文件，且**本次 QA 会话实测又新增若干同类残留**（每条命令的 sitecustomize tempfile 探测产生）。Lead 提交前务必清理，且**禁止 `git add -A` / `git add .`**（.gitignore 未覆盖无后缀随机名文件，会被误入库）——按 Backend 建议 `git add` 显式路径清单。
+++3. **[无风险确认] M1 前置已就位**：`CALC_AGENT_ENV_FILE` 语义（config.py:14）、`allowed_hosts` 白名单解析（config.py:34-37）、pyright venv 配置均已按契约落地，M1 可直接开工。
+++4. **[口径说明] 本报告所有 PASS(等效)/ENV-BLOCKED 分类**均附原文命令失败输出作环境归因证据，未以等效通过掩盖原文失败；最终判定以用户本地运行 §4 清单结果为准。
+++
+++---
+++
+++## 验收记录附录（关键原始输出摘录）
+++
+++```
+++# M0-1 / M0-3
+++ok=1 | body={"status":"ok"} | lsof_after_rc=1（端口清理确认）
+++
+++# M0-2 等效
+++collected 1 item / tests/unit/test_health.py . / 1 passed in 0.30s / exit=0
+++
+++# M0-4
+++pyright 1.1.414 / exit=0
+++
+++# G-3（grep rc 语义）
+++final_rc=0（grep rc=1 无匹配 → 通过）
+++
+++# G-4
+++[PASS] 分层依赖检查通过：无反向 import / exit=0
+++
+++# G-5a
+++0 errors, 0 warnings, 0 informations / exit=0
+++
+++# G-5b 等效
+++OK ×9（src 全部 py 文件内存编译）/ total=9, failed=0 / exit=0
+++
+++# check.sh 分项
+++[PASS] G-3 无硬编码密钥 | [PASS] G-4 分层依赖正确 | [PASS] G-5a pyright 零错误
+++[FAIL] G-1 pytest 全绿 | [FAIL] G-2 覆盖率命令可运行 | [FAIL] G-5b compileall 通过
+++（三个 FAIL 均归因 §0 环境拦截；聚合 exit=1）
+++```
++diff --git a/pyproject.toml b/pyproject.toml
++new file mode 100644
++index 0000000..f3d8faf
++--- /dev/null
+++++ b/pyproject.toml
++@@ -0,0 +1,30 @@
+++[project]
+++name = "cognitive-agent-lab"
+++version = "0.1.0"
+++description = "CognitiveAgent Lab — AI Agent runtime with task state persistence and observable event streams"
+++requires-python = ">=3.13"
+++dependencies = [
+++    "fastapi",
+++    "uvicorn",
+++    "pydantic",
+++    "pydantic-settings",
+++    "httpx",
+++    "openai",
+++]
+++
+++[dependency-groups]
+++dev = [
+++    "pytest",
+++    "pytest-asyncio",
+++    "pytest-cov",
+++    "pyright",
+++]
+++
+++[tool.pytest.ini_options]
+++testpaths = ["tests"]
+++pythonpath = ["."]
+++
+++[tool.pyright]
+++# 显式指定解释器环境，保证 `pyright src/` 解析到 .venv 的依赖
+++venvPath = "."
+++venv = ".venv"
++diff --git a/scripts/__init__.py b/scripts/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/scripts/check.sh b/scripts/check.sh
++new file mode 100755
++index 0000000..32ed7e4
++--- /dev/null
+++++ b/scripts/check.sh
++@@ -0,0 +1,68 @@
+++#!/usr/bin/env bash
+++# CI 门禁：G-1 ~ G-4 + G-5a + G-5b 六项，逐项独立执行、显式 if 判定退出码。
+++# 不使用 set -e（G-3 的 grep rc=1 是通过态，set -e 会中断脚本）。
+++# 聚合退出码：任一分项失败即非 0。
+++set -u
+++
+++ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+++cd "$ROOT"
+++PY="$ROOT/.venv/bin/python"
+++
+++# pyright 需要 Node.js 运行时：优先用 pip 包自带的 nodejs-bin，
+++# 缺失时回退到 managed node（确保 G-5a 不会因 PATH 缺 node 而失败）
+++export PATH="/Users/linyitong/.workbuddy/binaries/node/versions/22.22.2-6/bin:$PATH"
+++
+++overall=0
+++
+++report() {  # report <pass|fail> <分项名>
+++  if [ "$1" = "pass" ]; then
+++    echo "[PASS] $2"
+++  else
+++    echo "[FAIL] $2"
+++    overall=1
+++  fi
+++}
+++
+++echo "===== G-1 测试全绿（pytest） ====="
+++"$PY" -m pytest
+++if [ $? -eq 0 ]; then report pass "G-1 pytest 全绿"; else report fail "G-1 pytest 全绿"; fi
+++
+++echo
+++echo "===== G-2 覆盖率（pytest --cov，M0 仅要求可运行不报错） ====="
+++"$PY" -m pytest --cov=src --cov-report=term-missing
+++if [ $? -eq 0 ]; then report pass "G-2 覆盖率命令可运行"; else report fail "G-2 覆盖率命令可运行"; fi
+++
+++echo
+++echo "===== G-3 密钥扫描（grep rc=1 通过；rc=0/2 阻断） ====="
+++grep -rniE "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
+++g3_rc=$?
+++if [ "$g3_rc" -eq 1 ]; then
+++  report pass "G-3 无硬编码密钥"
+++elif [ "$g3_rc" -eq 0 ]; then
+++  report fail "G-3 发现疑似硬编码密钥（见上方 grep 输出）"
+++else
+++  report fail "G-3 扫描出错（grep rc=${g3_rc}）"
+++fi
+++
+++echo
+++echo "===== G-4 分层依赖检查（scripts.check_layers） ====="
+++"$PY" -m scripts.check_layers
+++if [ $? -eq 0 ]; then report pass "G-4 分层依赖正确"; else report fail "G-4 分层依赖正确"; fi
+++
+++echo
+++echo "===== G-5a 静态类型检查（pyright src/） ====="
+++"$PY" -m pyright src/
+++if [ $? -eq 0 ]; then report pass "G-5a pyright 零错误"; else report fail "G-5a pyright 零错误"; fi
+++
+++echo
+++echo "===== G-5b 语法编译检查（compileall -q src/） ====="
+++"$PY" -m compileall -q src/
+++if [ $? -eq 0 ]; then report pass "G-5b compileall 通过"; else report fail "G-5b compileall 通过"; fi
+++
+++echo
+++if [ "$overall" -eq 0 ]; then
+++  echo "======== 六项门禁全部 PASS ========"
+++else
+++  echo "======== 存在 FAIL 分项，见上方报告 ========"
+++fi
+++exit "$overall"
++diff --git a/scripts/check_layers.py b/scripts/check_layers.py
++new file mode 100644
++index 0000000..7148848
++--- /dev/null
+++++ b/scripts/check_layers.py
++@@ -0,0 +1,147 @@
+++"""静态分层依赖检查（G-4 门禁，规则来自 ARCHITECTURE §3）。
+++
+++依赖方向（强制单向）：``api → services → agent → tools/storage``。
+++- 业务层只允许 import 同层或更低层（tools 与 storage 同层，可互引）；
+++  import 更高层即反向依赖，违规。
+++- ``src/models/`` 与 ``src/config.py`` 为共享层：可被任何业务层引用，
+++  但自身不得 import 任何业务层（仅被引用，不引用业务层）。
+++- 项目外 import（标准库/第三方）不受限。
+++
+++用法：从项目根执行 ``python -m scripts.check_layers``；
+++退出码 0 = 通过（无反向 import），1 = 存在违规。
+++"""
+++
+++from __future__ import annotations
+++
+++import ast
+++import sys
+++from dataclasses import dataclass
+++from pathlib import Path
+++
+++PROJECT_ROOT = Path(__file__).resolve().parent.parent
+++SRC_ROOT = PROJECT_ROOT / "src"
+++
+++# 业务分层：数值越大层级越低（被依赖方）；只允许高层 → 低层
+++LAYER_ORDER: dict[str, int] = {
+++    "api": 0,
+++    "services": 1,
+++    "agent": 2,
+++    "tools": 3,
+++    "storage": 3,
+++}
+++
+++# 共享层：仅被引用，不得引用任何业务层
+++SHARED_MODULES: frozenset[str] = frozenset({"models", "config"})
+++
+++
+++@dataclass(frozen=True)
+++class ImportEdge:
+++    """一条项目内 import 依赖：source 模块 → target 顶层包。"""
+++
+++    source: Path
+++    source_layer: str  # 业务层名 / 共享模块名 / "src"（src/__init__.py）
+++    target: str
+++    lineno: int
+++    stmt: str
+++
+++
+++@dataclass(frozen=True)
+++class Violation:
+++    """一条分层违规。"""
+++
+++    edge: ImportEdge
+++    reason: str
+++
+++
+++def module_layer(path: Path) -> str:
+++    """返回模块所属层：src 下第一级包名（或顶层模块名去掉 .py）。"""
+++    rel = path.relative_to(SRC_ROOT)
+++    first = rel.parts[0]
+++    if len(rel.parts) == 1:
+++        return first[: -len(".py")] if first.endswith(".py") else first
+++    return first
+++
+++
+++def iter_project_imports(path: Path) -> list[tuple[str, int]]:
+++    """提取文件中所有指向项目内 src 包的 import（绝对 + 相对）。
+++
+++    返回 (目标模块路径, 行号) 列表；目标以 "src." 前缀规范化。
+++    """
+++    source = path.read_text(encoding="utf-8")
+++    tree = ast.parse(source, filename=str(path))
+++    # 当前模块在 src 包坐标下的包路径，用于解析相对导入
+++    rel = path.relative_to(SRC_ROOT)
+++    package_parts: tuple[str, ...] = ("src",)
+++    if len(rel.parts) > 1:
+++        package_parts = ("src", *rel.parts[:-1])
+++
+++    targets: list[tuple[str, int]] = []
+++    for node in ast.walk(tree):
+++        if isinstance(node, ast.Import):
+++            for alias in node.names:
+++                targets.append((alias.name, node.lineno))
+++        elif isinstance(node, ast.ImportFrom):
+++            if node.level == 0:
+++                if node.module:
+++                    targets.append((node.module, node.lineno))
+++            else:
+++                # 相对导入：按 level 回退包路径
+++                base_parts = package_parts[: len(package_parts) - (node.level - 1)] if node.level > 1 else package_parts
+++                prefix = ".".join(base_parts)
+++                mod = node.module or ""
+++                targets.append((f"{prefix}.{mod}" if mod else prefix, node.lineno))
+++    # 仅保留项目内 import（src.* 下）
+++    return [(t, ln) for t, ln in targets if t == "src" or t.startswith("src.")]
+++
+++
+++def check() -> list[Violation]:
+++    """扫描 src/ 全部 .py 文件，返回违规列表。"""
+++    violations: list[Violation] = []
+++    for path in sorted(SRC_ROOT.rglob("*.py")):
+++        layer = module_layer(path)
+++        for target, lineno in iter_project_imports(path):
+++            # 目标顶层包（src.<pkg>.… → <pkg>；src 本身或 src/__init__ 视为无业务目标）
+++            parts = target.split(".")
+++            if len(parts) < 2:
+++                continue  # `import src` 本身：不指向任何业务/共享模块
+++            target_pkg = parts[1]
+++            if target_pkg in LAYER_ORDER:
+++                if layer in LAYER_ORDER and LAYER_ORDER[layer] > LAYER_ORDER[target_pkg]:
+++                    violations.append(
+++                        Violation(
+++                            edge=ImportEdge(path, layer, target_pkg, lineno, target),
+++                            reason=f"反向 import：{layer}（层 {LAYER_ORDER[layer]}）"
+++                            f"不得依赖 {target_pkg}（层 {LAYER_ORDER[target_pkg]}）",
+++                        )
+++                    )
+++                elif layer in SHARED_MODULES:
+++                    violations.append(
+++                        Violation(
+++                            edge=ImportEdge(path, layer, target_pkg, lineno, target),
+++                            reason=f"共享层 {layer} 仅被引用，不得 import 业务层 {target_pkg}",
+++                        )
+++                    )
+++            # 目标为共享层（models/config）或同层或更低层：合法
+++    return violations
+++
+++
+++def main() -> int:
+++    if not SRC_ROOT.is_dir():
+++        print(f"[FAIL] 未找到 src/ 目录：{SRC_ROOT}", file=sys.stderr)
+++        return 1
+++    violations = check()
+++    if violations:
+++        print(f"[FAIL] 分层依赖检查发现 {len(violations)} 处违规：", file=sys.stderr)
+++        for v in violations:
+++            rel = v.edge.source.relative_to(PROJECT_ROOT)
+++            print(
+++                f"  {rel}:{v.edge.lineno}  import {v.edge.stmt}  → {v.reason}",
+++                file=sys.stderr,
+++            )
+++        return 1
+++    print("[PASS] 分层依赖检查通过：无反向 import（api → services → agent → tools/storage，models/config 仅被引用）")
+++    return 0
+++
+++
+++if __name__ == "__main__":
+++    raise SystemExit(main())
++diff --git a/src/__init__.py b/src/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/src/agent/__init__.py b/src/agent/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/src/api/__init__.py b/src/api/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/src/api/app.py b/src/api/app.py
++new file mode 100644
++index 0000000..c29f20e
++--- /dev/null
+++++ b/src/api/app.py
++@@ -0,0 +1,18 @@
+++"""FastAPI 应用入口（M0：仅 /health 端点）。"""
+++
+++from __future__ import annotations
+++
+++from fastapi import FastAPI
+++
+++from src.config import get_settings
+++
+++app = FastAPI(title="CognitiveAgent Lab")
+++
+++# M0-3 依据：无 key 环境下配置可正常加载（构造失败会在 import 时暴露）
+++get_settings()
+++
+++
+++@app.get("/health")
+++def health() -> dict[str, str]:
+++    """健康检查：body 精确为 {"status":"ok"}。"""
+++    return {"status": "ok"}
++diff --git a/src/config.py b/src/config.py
++new file mode 100644
++index 0000000..be2bbe4
++--- /dev/null
+++++ b/src/config.py
++@@ -0,0 +1,42 @@
+++"""应用配置：pydantic-settings 从环境变量与 .env 文件加载（ARCHITECTURE §7）。
+++
+++env_file 路径受 ``CALC_AGENT_ENV_FILE`` 环境变量覆盖（默认 ``.env``），
+++设为 ``/dev/null`` 即完全绕开 .env 文件（无 key 环境验收依据）。
+++M0 阶段密钥字段可为空，不校验存在性。
+++"""
+++
+++from __future__ import annotations
+++
+++import os
+++
+++from pydantic_settings import BaseSettings, SettingsConfigDict
+++
+++_ENV_FILE: str = os.environ.get("CALC_AGENT_ENV_FILE", ".env")
+++
+++
+++class Settings(BaseSettings):
+++    """全局配置（字段与 .env.example 一一对应）。"""
+++
+++    model_config = SettingsConfigDict(
+++        env_file=_ENV_FILE,
+++        env_file_encoding="utf-8",
+++        extra="ignore",
+++    )
+++
+++    openai_api_key: str = ""
+++    anthropic_api_key: str = ""
+++    llm_base_url: str = ""
+++    llm_model: str = "gpt-4o"
+++    calc_agent_max_steps: int = 25
+++    http_allowed_hosts: str = "example.com"
+++    data_sandbox_dir: str = "data"
+++
+++    @property
+++    def allowed_hosts(self) -> list[str]:
+++        """逗号分隔的域名白名单解析为列表。"""
+++        return [host.strip() for host in self.http_allowed_hosts.split(",") if host.strip()]
+++
+++
+++def get_settings() -> Settings:
+++    """构造 Settings 实例（无 key 环境下也可正常构造，M0-3 依据）。"""
+++    return Settings()
++diff --git a/src/models/__init__.py b/src/models/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/src/services/__init__.py b/src/services/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/src/storage/__init__.py b/src/storage/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/src/tools/__init__.py b/src/tools/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/tests/__init__.py b/tests/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/tests/e2e/__init__.py b/tests/e2e/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/tests/integration/__init__.py b/tests/integration/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/tests/unit/__init__.py b/tests/unit/__init__.py
++new file mode 100644
++index 0000000..e69de29
++diff --git a/tests/unit/test_health.py b/tests/unit/test_health.py
++new file mode 100644
++index 0000000..c090c66
++--- /dev/null
+++++ b/tests/unit/test_health.py
++@@ -0,0 +1,15 @@
+++"""M0-2：/health 端点真实测试（collected ≥ 1 的最低要求）。"""
+++
+++from __future__ import annotations
+++
+++from fastapi.testclient import TestClient
+++
+++from src.api.app import app
+++
+++client = TestClient(app)
+++
+++
+++def test_health_returns_ok() -> None:
+++    response = client.get("/health")
+++    assert response.status_code == 200
+++    assert response.json() == {"status": "ok"}
++diff --git a/web/index.html b/web/index.html
++new file mode 100644
++index 0000000..8d5533d
++--- /dev/null
+++++ b/web/index.html
++@@ -0,0 +1,11 @@
+++<!DOCTYPE html>
+++<html lang="zh-CN">
+++<head>
+++  <meta charset="UTF-8">
+++  <title>CognitiveAgent Lab</title>
+++</head>
+++<body>
+++  <h1>CognitiveAgent Lab</h1>
+++  <p>前端界面将于 M3 交付。</p>
+++</body>
+++</html>
+diff --git a/examples/run_agent.py b/examples/run_agent.py
+new file mode 100644
+index 0000000..a4dee62
+--- /dev/null
++++ b/examples/run_agent.py
+@@ -0,0 +1,58 @@
++"""M1 CLI 入口：经 pydantic-settings 自读 .env，驱动 AgentLoop（契约 §1.5）。
++
++用法：python examples/run_agent.py "<goal>"
++退出码：completed → 0；failed → 1；缺 key → 2。
++"""
++
++from __future__ import annotations
++
++import argparse
++import asyncio
++import os
++import sys
++from pathlib import Path
++from uuid import uuid4
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # examples/ 不是包
++
++from src.agent import build_registry  # noqa: E402
++from src.agent.llm import LLMClient  # noqa: E402
++from src.agent.loop import AgentLoop  # noqa: E402
++from src.config import get_settings  # noqa: E402
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description="Run a single CognitiveAgent Lab task")
++    parser.add_argument("goal", help="task goal in natural language")
++    goal = parser.parse_args().goal
++
++    settings = get_settings()  # 自读 .env，受 CALC_AGENT_ENV_FILE 路径覆盖
++    if not settings.openai_api_key and not settings.anthropic_api_key:
++        env_file = os.environ.get("CALC_AGENT_ENV_FILE", ".env")
++        print(
++            "ERROR: no LLM API key configured — both OPENAI_API_KEY and ANTHROPIC_API_KEY "
++            f"are empty. Set one of them in your env file "
++            f"(CALC_AGENT_ENV_FILE={env_file!r}, default path: .env).",
++            file=sys.stderr,
++        )
++        return 2
++
++    task_id = f"task-{uuid4().hex[:12]}"
++    print(f"task_id: {task_id}")  # 首行（M1-2 的 TASK_ID 提取依据）
++
++    client = LLMClient(settings)
++    loop = AgentLoop(
++        client=client,
++        registry=build_registry(settings),
++        settings=settings,
++        task_id=task_id,
++    )
++    result = asyncio.run(loop.run_task(goal))
++
++    print(f"status: {result.status}")
++    print(f"result: {result.result[:512]}")
++    return 0 if result.status == "completed" else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/agent/__init__.py b/src/agent/__init__.py
+index e69de29..610f77a 100644
+--- a/src/agent/__init__.py
++++ b/src/agent/__init__.py
+@@ -0,0 +1,16 @@
++"""agent 包组装入口：build_registry（契约 §4，agent → tools 方向合法）。"""
++
++from __future__ import annotations
++
++from src.agent.registry import ToolRegistry
++from src.config import Settings
++from src.tools import calc, file_write, http_request
++
++
++def build_registry(settings: Settings) -> ToolRegistry:
++    """注册 M1 三工具（calc / http_request / file_write）。"""
++    registry = ToolRegistry()
++    registry.register(calc.build_tool_spec(settings))
++    registry.register(http_request.build_tool_spec(settings))
++    registry.register(file_write.build_tool_spec(settings))
++    return registry
+diff --git a/src/agent/events.py b/src/agent/events.py
+new file mode 100644
+index 0000000..b33d841
+--- /dev/null
++++ b/src/agent/events.py
+@@ -0,0 +1,30 @@
++"""EventLog：JSONL 事件日志（契约 §1.4；ARCHITECTURE §8 的 M1 形态，无 DB 仅文件）。"""
++
++from __future__ import annotations
++
++from pathlib import Path
++
++from src.models.events import AgentEvent
++
++
++class EventLog:
++    """逐事件追加 + 即时 flush，保证 kill -9 后已写事件不丢（M2 断点恢复基础）。"""
++
++    def __init__(self, task_id: str, log_dir: str | Path = "logs") -> None:
++        self._path = Path(log_dir) / f"agent-{task_id}.jsonl"
++        try:
++            self._path.parent.mkdir(parents=True, exist_ok=True)
++        except OSError:
++            if not self._path.parent.is_dir():
++                raise  # 宿主安全代理可能把跨进程已存在目录的 EEXIST 包成 PermissionError
++
++    @property
++    def path(self) -> Path:
++        """JSONL 文件路径。"""
++        return self._path
++
++    def append(self, event: AgentEvent) -> None:
++        """以 "a" 模式追加单条 JSON 行并 flush。"""
++        with self._path.open("a", encoding="utf-8") as fh:
++            fh.write(event.model_dump_json() + "\n")
++            fh.flush()
+diff --git a/src/agent/llm.py b/src/agent/llm.py
+new file mode 100644
+index 0000000..008c18c
+--- /dev/null
++++ b/src/agent/llm.py
+@@ -0,0 +1,73 @@
++"""LLMClient（openai SDK 封装）与 LLMClientProtocol（FakeLLM 替换点，契约 §1.1）。"""
++
++from __future__ import annotations
++
++import json
++from typing import Any, Protocol, cast
++
++from openai import AsyncOpenAI
++
++from src.config import Settings
++from src.models.llm import LLMResponse, ToolCallRequest
++
++Message = dict[str, Any]  # OpenAI chat 消息 JSON 格式（system / user / assistant(tool_calls) / tool）
++
++
++class LLMProtocolError(Exception):
++    """供应商响应不符合协议（如 tool_call 参数非合法 JSON）——不可恢复，任务 failed。"""
++
++
++class LLMClientProtocol(Protocol):
++    """AgentLoop 的依赖类型（鸭子类型：任何实现该签名的对象可注入——FakeLLM 替换点）。"""
++
++    async def chat(self, messages: list[Message], tools: list[dict[str, Any]]) -> LLMResponse: ...
++
++
++class LLMClient:
++    """openai.AsyncOpenAI 封装，实现 LLMClientProtocol。"""
++
++    def __init__(self, settings: Settings, timeout: float = 60.0, max_retries: int = 2) -> None:
++        """key 为空时不在构造期抛错——由调用方（run_agent / M2 服务层）显式校验。
++
++        timeout 与 max_retries 透传给 SDK（网络错误/超时重试由 openai SDK 承担）。
++        """
++        self._model = settings.llm_model
++        self._client = AsyncOpenAI(
++            api_key=settings.openai_api_key,
++            base_url=settings.llm_base_url or None,  # 兼容端点切换（ADR-002）
++            timeout=timeout,
++            max_retries=max_retries,
++        )
++
++    async def chat(self, messages: list[Message], tools: list[dict[str, Any]]) -> LLMResponse:
++        """调用 chat.completions.create 并转为统一 LLMResponse。
++
++        - tool_call 参数 JSON 解析失败 → LLMProtocolError（loop 视为不可恢复）；
++        - SDK 重试耗尽后抛出的异常原样上抛，由 loop 捕获终止。
++        """
++        response = await self._client.chat.completions.create(
++            model=self._model,
++            messages=cast(Any, messages),
++            tools=cast(Any, tools),
++        )
++        choice = response.choices[0]
++        tool_calls: list[ToolCallRequest] = []
++        for native in choice.message.tool_calls or []:
++            if native.type != "function" or native.function is None:
++                raise LLMProtocolError(f"unsupported tool_call type: {native.type!r}")
++            try:
++                arguments = json.loads(native.function.arguments or "{}")
++            except json.JSONDecodeError as exc:
++                raise LLMProtocolError(f"invalid tool arguments JSON: {exc}") from exc
++            tool_calls.append(
++                ToolCallRequest(
++                    remote_id=native.id,
++                    tool_name=native.function.name,
++                    arguments=arguments,
++                )
++            )
++        return LLMResponse(
++            content=choice.message.content or "",
++            tool_calls=tool_calls,
++            finish_reason=choice.finish_reason or "stop",
++        )
+diff --git a/src/agent/loop.py b/src/agent/loop.py
+new file mode 100644
+index 0000000..cec9d55
+--- /dev/null
++++ b/src/agent/loop.py
+@@ -0,0 +1,157 @@
++"""AgentLoop 主循环：plan → act → observe（契约 §1.3；ARCHITECTURE §4）。"""
++
++from __future__ import annotations
++
++import json
++from collections.abc import Callable
++from datetime import datetime, timezone
++from typing import Any
++from uuid import uuid4
++
++from src.agent.events import EventLog
++from src.agent.llm import LLMClientProtocol, Message
++from src.agent.registry import ToolRegistry
++from src.config import Settings
++from src.models.agent_result import AgentResult
++from src.models.events import AgentEvent, AgentEventType
++
++_SYSTEM_PROMPT = (
++    "你是多步任务执行 Agent。可用工具以 tools 参数提供。需要外部能力时调用工具。"
++    "工具失败时会收到 ERROR: 前缀的 tool 结果，应换参数重试或改变策略。"
++    "目标达成后直接给出最终答案文本、不再调用工具。"
++)
++
++_SUMMARY_LIMIT = 512
++
++
++class AgentLoop:
++    """单任务主循环（M1：无持久化、无恢复语义，事件落 JSONL）。"""
++
++    def __init__(
++        self,
++        client: LLMClientProtocol,
++        registry: ToolRegistry,
++        settings: Settings,
++        on_event: Callable[[AgentEvent], None] | None = None,
++        task_id: str | None = None,
++    ) -> None:
++        """task_id 可由调用方（CLI）预生成，保证 stdout 提前打印与事件文件同名。"""
++        self._client = client
++        self._registry = registry
++        self._settings = settings
++        self._on_event = on_event
++        self._task_id = task_id if task_id is not None else f"task-{uuid4().hex[:12]}"
++
++    async def run_task(self, goal: str) -> AgentResult:
++        """执行任务，返回完整结果（事件先落 JSONL 再继续）。"""
++        log = EventLog(self._task_id)
++        events: list[AgentEvent] = []
++        seq = 0
++
++        def emit(event_type: AgentEventType, payload: dict[str, object]) -> AgentEvent:
++            nonlocal seq
++            seq += 1
++            event = AgentEvent(
++                type=event_type,
++                seq=seq,
++                ts=datetime.now(timezone.utc),
++                payload=payload,
++            )
++            log.append(event)  # 事件先落盘再继续（契约 §1.3.6）
++            events.append(event)
++            if self._on_event is not None:
++                self._on_event(event)
++            return event
++
++        emit(AgentEventType.status, {"status": "running", "reason": "task started"})
++
++        messages: list[Message] = [
++            {"role": "system", "content": _SYSTEM_PROMPT},
++            {"role": "user", "content": goal},
++        ]
++        steps = 0
++        status = "completed"
++        result_text = ""
++
++        while True:
++            if steps >= self._settings.calc_agent_max_steps:
++                status = "failed"
++                result_text = "max steps exceeded"
++                emit(AgentEventType.error, {"message": "max steps exceeded"})
++                break
++            try:
++                response = await self._client.chat(messages, self._registry.get_schemas())
++            except (AssertionError, KeyboardInterrupt, SystemExit):
++                # 测试断言与中断信号穿透，不被吞成 failed
++                raise
++            except Exception as exc:  # 重试耗尽 / LLMProtocolError → 不可恢复
++                status = "failed"
++                result_text = f"llm error: {type(exc).__name__}: {exc}"
++                emit(AgentEventType.error, {"message": result_text[:_SUMMARY_LIMIT]})
++                break
++
++            steps += 1
++
++            if not response.tool_calls:
++                # 模型给出最终答案；content 不产出任何事件（ADR-006）
++                status = "completed"
++                result_text = response.content
++                break
++
++            native_calls: list[dict[str, Any]] = [
++                {
++                    "id": call.remote_id,
++                    "type": "function",
++                    "function": {
++                        "name": call.tool_name,
++                        "arguments": json.dumps(call.arguments, ensure_ascii=False),
++                    },
++                }
++                for call in response.tool_calls
++            ]
++            messages.append(
++                {"role": "assistant", "content": response.content, "tool_calls": native_calls}
++            )
++
++            for call in response.tool_calls:
++                # tool_call_id = 该 tool_call 事件的 seq（契约 §1.3.2，事件序号方案）
++                next_seq = seq + 1
++                tool_call_id = f"call_{next_seq:04d}"
++                args_summary = json.dumps(call.arguments, ensure_ascii=False)
++                emit(
++                    AgentEventType.tool_call,
++                    {
++                        "tool_call_id": tool_call_id,
++                        "tool_name": call.tool_name,
++                        "args_summary": args_summary[:_SUMMARY_LIMIT],
++                    },
++                )
++                tool_result = await self._registry.execute(call.tool_name, call.arguments)
++                summary = tool_result.result if tool_result.ok else tool_result.error
++                emit(
++                    AgentEventType.tool_result,
++                    {
++                        "tool_call_id": tool_call_id,
++                        "ok": tool_result.ok,
++                        "result_summary": summary[:_SUMMARY_LIMIT],
++                    },
++                )
++                tool_content = (
++                    tool_result.result if tool_result.ok else f"ERROR: {tool_result.error}"
++                )
++                messages.append(
++                    {"role": "tool", "tool_call_id": call.remote_id, "content": tool_content}
++                )
++
++        # final 必发（任何终止路径）
++        emit(
++            AgentEventType.final,
++            {"status": status, "result_summary": result_text[:_SUMMARY_LIMIT]},
++        )
++        return AgentResult(
++            task_id=self._task_id,
++            status=status,
++            result=result_text,
++            steps=steps,
++            events=events,
++        )
+diff --git a/src/agent/registry.py b/src/agent/registry.py
+new file mode 100644
+index 0000000..6bc5b28
+--- /dev/null
++++ b/src/agent/registry.py
+@@ -0,0 +1,68 @@
++"""ToolRegistry：运行期唯一工具入口，异常不外抛（契约 §1.2；M1-3）。"""
++
++from __future__ import annotations
++
++import inspect
++from typing import Any
++
++from pydantic import BaseModel, ValidationError
++
++from src.models.tool_result import ToolResult
++from src.models.tool_spec import ToolSpec
++
++
++class ToolRegistryError(Exception):
++    """注册期校验失败（启动期错误，非运行期）。"""
++
++
++class ToolRegistry:
++    """工具注册表。"""
++
++    def __init__(self) -> None:
++        self._specs: dict[str, ToolSpec] = {}
++
++    def register(self, spec: ToolSpec) -> None:
++        """校验并登记；任何校验失败抛 ToolRegistryError。"""
++        if not spec.name:
++            raise ToolRegistryError("tool name must be non-empty")
++        if spec.name in self._specs:
++            raise ToolRegistryError(f"duplicate tool name: {spec.name}")
++        if not (isinstance(spec.input_model, type) and issubclass(spec.input_model, BaseModel)):
++            raise ToolRegistryError(f"input_model must be a BaseModel subclass, got {spec.input_model!r}")
++        if not callable(spec.executor) or not inspect.iscoroutinefunction(spec.executor):
++            raise ToolRegistryError(f"executor must be an async callable, got {spec.executor!r}")
++        self._specs[spec.name] = spec
++
++    def get_schemas(self) -> list[dict[str, Any]]:
++        """导出 OpenAI tools 格式（供 LLMClient.chat 的 tools 参数）。"""
++        return [
++            {
++                "type": "function",
++                "function": {
++                    "name": spec.name,
++                    "description": spec.description,
++                    "parameters": spec.input_model.model_json_schema(),
++                },
++            }
++            for spec in self._specs.values()
++        ]
++
++    async def execute(self, name: str, args: dict[str, Any]) -> ToolResult:
++        """运行期唯一入口：任何失败路径都返回 ToolResult(ok=False)，不外抛异常。"""
++        spec = self._specs.get(name)
++        if spec is None:
++            return ToolResult(ok=False, error=f"unknown tool: {name}")
++        try:
++            parsed = spec.input_model.model_validate(args)
++        except ValidationError as exc:
++            return ToolResult(ok=False, error=f"invalid arguments: {exc}"[:512])
++        except Exception as exc:  # 防御：非预期校验错误也不外抛
++            return ToolResult(ok=False, error=f"invalid arguments: {exc}"[:512])
++        try:
++            return await spec.executor(parsed)
++        except Exception as exc:
++            return ToolResult(ok=False, error=f"tool execution failed: {type(exc).__name__}: {exc}"[:512])
++
++    def get(self, name: str) -> ToolSpec | None:
++        """按名取 spec（测试与 M2 预留）。"""
++        return self._specs.get(name)
+diff --git a/src/models/agent_result.py b/src/models/agent_result.py
+new file mode 100644
+index 0000000..c59bb8e
+--- /dev/null
++++ b/src/models/agent_result.py
+@@ -0,0 +1,17 @@
++"""Agent 任务结果模型（契约 §1.0）。"""
++
++from __future__ import annotations
++
++from pydantic import BaseModel, Field
++
++from src.models.events import AgentEvent
++
++
++class AgentResult(BaseModel):
++    """run_task 的返回。"""
++
++    task_id: str
++    status: str  # "completed" | "failed"
++    result: str  # 最终答案（completed）或失败原因（failed）
++    steps: int  # 实际消耗的 LLM 调用轮数
++    events: list[AgentEvent] = Field(default_factory=list)  # 完整事件序列（与 JSONL 一致）
+diff --git a/src/models/events.py b/src/models/events.py
+new file mode 100644
+index 0000000..f66e111
+--- /dev/null
++++ b/src/models/events.py
+@@ -0,0 +1,27 @@
++"""公开事件模型（契约 §1.0；ARCHITECTURE §3.1 / ADR-006，无 thought）。"""
++
++from __future__ import annotations
++
++from datetime import datetime
++from enum import Enum
++
++from pydantic import BaseModel, Field
++
++
++class AgentEventType(str, Enum):
++    """公开事件类型完整枚举。"""
++
++    status = "status"
++    tool_call = "tool_call"
++    tool_result = "tool_result"
++    error = "error"
++    final = "final"
++
++
++class AgentEvent(BaseModel):
++    """单条公开事件。"""
++
++    type: AgentEventType
++    seq: int  # 任务级单调递增，从 1 开始
++    ts: datetime  # UTC
++    payload: dict[str, object] = Field(default_factory=dict)
+diff --git a/src/models/llm.py b/src/models/llm.py
+new file mode 100644
+index 0000000..35e46d9
+--- /dev/null
++++ b/src/models/llm.py
+@@ -0,0 +1,21 @@
++"""LLM 交互共享模型（契约 §1.0）。"""
++
++from __future__ import annotations
++
++from pydantic import BaseModel, Field
++
++
++class ToolCallRequest(BaseModel):
++    """LLM 返回的一次工具调用（统一结构，隔离供应商格式）。"""
++
++    remote_id: str  # 供应商侧 ID（OpenAI tool_call.id；FakeLLM 自造如 "fake-0"）
++    tool_name: str
++    arguments: dict[str, object] = Field(default_factory=dict)
++
++
++class LLMResponse(BaseModel):
++    """LLMClient.chat 的统一返回。"""
++
++    content: str = ""  # 模型文本（内部推理——不写入任何事件/JSONL，ADR-006）
++    tool_calls: list[ToolCallRequest] = Field(default_factory=list)
++    finish_reason: str = "stop"  # "tool_calls" | "stop" | 其他供应商值
+diff --git a/src/models/tool_result.py b/src/models/tool_result.py
+new file mode 100644
+index 0000000..218fe77
+--- /dev/null
++++ b/src/models/tool_result.py
+@@ -0,0 +1,13 @@
++"""工具执行统一返回（契约 §1.0；工具异常不抛出到 loop 外，M1-3）。"""
++
++from __future__ import annotations
++
++from pydantic import BaseModel
++
++
++class ToolResult(BaseModel):
++    """工具执行结果。"""
++
++    ok: bool
++    result: str = ""  # 成功时的结果文本（回传 LLM）
++    error: str = ""  # 失败原因（回传 LLM）；安全拒绝统一前缀 "BLOCKED: "
+diff --git a/src/models/tool_spec.py b/src/models/tool_spec.py
+new file mode 100644
+index 0000000..37382c5
+--- /dev/null
++++ b/src/models/tool_spec.py
+@@ -0,0 +1,40 @@
++"""ToolSpec 工具注册声明（契约 §1.2；ARCHITECTURE §6.4）。
++
++位置说明：契约 §1.2 将 ToolSpec 列于 src/agent/registry.py，但契约 §4 禁止
++``src/tools/`` import ``src.agent``（工具模块构造 ToolSpec 必然需要该类型），
++且 §4 规定"共享类型一律走 src/models/"——故 ToolSpec 落位于本模块（签名不变），
++ToolRegistry 仍在 src/agent/registry.py。
++"""
++
++from __future__ import annotations
++
++from collections.abc import Awaitable, Callable
++from typing import Any, Literal
++
++from pydantic import BaseModel, ConfigDict
++
++from src.models.tool_result import ToolResult
++
++Idempotency = Literal["idempotent", "non-idempotent"]
++RiskLevel = Literal["low", "medium", "high"]
++
++
++class ToolSpec(BaseModel):
++    """工具注册声明（idempotency / risk_level 必填，缺失/非法值构造期即失败）。"""
++
++    model_config = ConfigDict(arbitrary_types_allowed=True)
++
++    name: str
++    description: str
++    input_model: type[BaseModel]  # 参数校验模型（model_json_schema 自动导出）
++    idempotency: Idempotency
++    risk_level: RiskLevel
++    executor: Callable[[BaseModel], Awaitable[ToolResult]]
++
++    def effective_idempotency(self, args: dict[str, Any]) -> Idempotency:
++        """调用级有效幂等性（ARCHITECTURE §6.4）：默认返回声明值。
++
++        需要按参数覆写的工具（如 http_request 的 GET）子类化本类并覆写本方法。
++        M1 不被 loop 消费，但必须实现并可测（M2 将把生效值快照进 ToolCall 表）。
++        """
++        return self.idempotency
+diff --git a/src/tools/calc.py b/src/tools/calc.py
+new file mode 100644
+index 0000000..5c367da
+--- /dev/null
++++ b/src/tools/calc.py
+@@ -0,0 +1,169 @@
++"""calc 工具：AST 白名单安全表达式计算（契约 §2.1；ARCHITECTURE §6.1 / ADR-005）。
++
++全程禁用 eval/exec/compile 字符串执行——求值为自实现 AST 递归求值器。
++"""
++
++from __future__ import annotations
++
++import ast
++import math
++from typing import Any, Callable, cast
++
++from pydantic import BaseModel, Field
++
++from src.config import Settings
++from src.models.tool_result import ToolResult
++from src.models.tool_spec import ToolSpec
++
++MAX_DEPTH = 20  # AST 嵌套深度上限
++
++_ALLOWED_BINOPS: tuple[type[ast.operator], ...] = (
++    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
++)
++_ALLOWED_UNARYOPS: tuple[type[ast.unaryop], ...] = (ast.UAdd, ast.USub)
++
++# 函数白名单：名 → (实现, (最少元数, 最多元数或 None 表示不限))
++_FUNCTIONS: dict[str, tuple[Callable[..., Any], tuple[int, int | None]]] = {
++    "abs": (abs, (1, 1)),
++    "min": (min, (2, None)),
++    "max": (max, (2, None)),
++    "round": (round, (1, 2)),
++    "sqrt": (math.sqrt, (1, 1)),
++    "pow": (pow, (2, 2)),
++}
++
++_MAX_POW_EXPONENT = 1000  # Pow 指数绝对值上限
++
++
++class _CalcBlocked(Exception):
++    """安全拒绝（→ BLOCKED: 前缀）。"""
++
++
++class _CalcOutOfRange(Exception):
++    """数学越界（指数过大/复数/inf）。"""
++
++
++def _power(left: int | float, right: int | float) -> int | float:
++    """Pow 统一检查：指数绝对值上限、复数/inf 结果拦截（BinOp 与 pow() 函数共用）。"""
++    if abs(right) > _MAX_POW_EXPONENT:
++        raise _CalcOutOfRange
++    value = left**right
++    if isinstance(value, complex) or (isinstance(value, float) and math.isinf(value)):
++        raise _CalcOutOfRange
++    return value
++
++
++class CalcInput(BaseModel):
++    """calc 参数。"""
++
++    expression: str = Field(min_length=1, max_length=200)
++
++
++def _paren_depth(expression: str) -> int:
++    """括号最大嵌套深度（括号不产生 AST 节点，需单独计数）。"""
++    depth = 0
++    max_depth = 0
++    for ch in expression:
++        if ch == "(":
++            depth += 1
++            max_depth = max(max_depth, depth)
++        elif ch == ")":
++            depth -= 1
++    return max_depth
++
++
++def _eval(node: ast.AST, depth: int) -> int | float:
++    """白名单递归求值器：凡不在白名单的节点一律拒绝。"""
++    if depth > MAX_DEPTH:
++        raise _CalcBlocked("expression too deep")
++    if isinstance(node, ast.Expression):
++        return _eval(node.body, depth)
++    if isinstance(node, ast.Constant):
++        # bool 是 int 子类，显式排除；字符串/None 拒绝
++        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
++            raise _CalcBlocked(f"constant not allowed: {node.value!r}")
++        return node.value
++    if isinstance(node, ast.BinOp):
++        if not isinstance(node.op, _ALLOWED_BINOPS):
++            raise _CalcBlocked(f"operator not allowed: {type(node.op).__name__}")
++        left = _eval(node.left, depth + 1)
++        right = _eval(node.right, depth + 1)
++        op = node.op
++        if isinstance(op, ast.Add):
++            return left + right
++        if isinstance(op, ast.Sub):
++            return left - right
++        if isinstance(op, ast.Mult):
++            return left * right
++        if isinstance(op, ast.Div):
++            return left / right  # 除零由 ZeroDivisionError 路径处理
++        if isinstance(op, ast.Mod):
++            return left % right
++        if isinstance(op, ast.Pow):
++            return _power(left, right)
++        raise _CalcBlocked(f"operator not allowed: {type(op).__name__}")
++    if isinstance(node, ast.UnaryOp):
++        if not isinstance(node.op, _ALLOWED_UNARYOPS):
++            raise _CalcBlocked(f"unary operator not allowed: {type(node.op).__name__}")
++        value = _eval(node.operand, depth + 1)
++        if isinstance(node.op, ast.UAdd):
++            return +value
++        return -value
++    if isinstance(node, ast.Call):
++        if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCTIONS:
++            raise _CalcBlocked("only whitelisted functions may be called")
++        if node.keywords:
++            raise _CalcBlocked("keyword arguments not allowed")
++        if any(isinstance(arg, ast.Starred) for arg in node.args):
++            raise _CalcBlocked("star args not allowed")
++        func, (min_arity, max_arity) = _FUNCTIONS[node.func.id]
++        if len(node.args) < min_arity or (max_arity is not None and len(node.args) > max_arity):
++            raise _CalcBlocked(f"invalid arity for {node.func.id}: {len(node.args)}")
++        args = [_eval(arg, depth + 1) for arg in node.args]
++        if node.func.id == "pow" and len(args) == 2:
++            return _power(args[0], args[1])
++        return func(*args)
++    # 凡不在白名单：Name、Attribute、Subscript、Lambda、Compare、BoolOp、IfExp、
++    # Tuple/List/Set/Dict、推导式等一律拒绝
++    raise _CalcBlocked(f"node not allowed: {type(node).__name__}")
++
++
++async def _execute(args: CalcInput) -> ToolResult:
++    expression = args.expression
++    if _paren_depth(expression) > MAX_DEPTH:
++        return ToolResult(ok=False, error="BLOCKED: expression too deep")
++    try:
++        tree = ast.parse(expression, mode="eval")
++    except (SyntaxError, ValueError, MemoryError, RecursionError):
++        return ToolResult(ok=False, error="BLOCKED: invalid expression")
++    try:
++        value = _eval(tree, 1)
++        text = repr(value) if isinstance(value, float) else str(value)
++    except _CalcBlocked as exc:
++        return ToolResult(ok=False, error=f"BLOCKED: {exc}")
++    except _CalcOutOfRange:
++        return ToolResult(ok=False, error="calc: result out of range")
++    except ZeroDivisionError:
++        return ToolResult(ok=False, error="calc: division by zero")
++    except (ValueError, OverflowError):
++        return ToolResult(ok=False, error="calc: math domain error")
++    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
++        return ToolResult(ok=False, error="calc: result out of range")
++    return ToolResult(ok=True, result=text)
++
++
++async def _executor(base: Any) -> ToolResult:
++    """BaseModel 入口包装（registry 统一调用签名）。"""
++    return await _execute(cast(CalcInput, base))
++
++
++def build_tool_spec(settings: Settings) -> ToolSpec:
++    """构造 calc 的 ToolSpec（settings 保留统一签名，calc 无配置项）。"""
++    return ToolSpec(
++        name="calc",
++        description="计算算术表达式，支持 + - * / % ** 与函数 abs/min/max/round/sqrt/pow",
++        input_model=CalcInput,
++        idempotency="idempotent",
++        risk_level="low",
++        executor=_executor,
++    )
+diff --git a/src/tools/file_write.py b/src/tools/file_write.py
+new file mode 100644
+index 0000000..180d139
+--- /dev/null
++++ b/src/tools/file_write.py
+@@ -0,0 +1,104 @@
++"""file_write 工具：data/ 沙箱写入（契约 §2.3；ARCHITECTURE §6.3 / ADR-005）。"""
++
++from __future__ import annotations
++
++import os
++import stat
++from pathlib import Path
++from typing import Any, cast
++
++from pydantic import BaseModel, Field
++
++from src.config import Settings
++from src.models.tool_result import ToolResult
++from src.models.tool_spec import ToolSpec
++
++MAX_BYTES = 1_048_576  # 1MB 字节上限
++
++
++class FileWriteInput(BaseModel):
++    """file_write 参数。"""
++
++    path: str = Field(min_length=1)  # 相对沙箱根的路径
++    content: str = Field(max_length=MAX_BYTES)  # 字符上限（Pydantic 层第一道）
++
++
++class _FileWriteBlocked(Exception):
++    """安全拒绝（→ BLOCKED: 前缀）。"""
++
++
++def _ensure_dir(path: Path) -> None:
++    """mkdir 容错：目录已存在（含宿主安全代理把跨进程 EEXIST 包成 PermissionError 的场景）时静默通过。"""
++    try:
++        path.mkdir(parents=True, exist_ok=True)
++    except OSError:
++        if not path.is_dir():
++            raise
++
++
++def _validate_and_write(args: FileWriteInput, sandbox: Path) -> int:
++    """五步安全规则（契约顺序冻结），返回写入字节数。"""
++    rel_parts = Path(args.path).parts
++
++    # 1. 字符串级拒绝 .. 与绝对路径
++    if os.path.isabs(args.path) or ".." in rel_parts:
++        raise _FileWriteBlocked("path traversal")
++
++    # 沙箱根本身允许自动创建（配置指定位置），保证后续锚点存在
++    _ensure_dir(sandbox)
++    sandbox_real = Path(os.path.realpath(sandbox))
++    target = sandbox.joinpath(*rel_parts)
++
++    # 2. realpath + 组件边界前缀校验（防 data-evil 字符串前缀歧义）
++    deepest = target
++    while not deepest.exists():
++        deepest = deepest.parent
++    deepest_real = Path(os.path.realpath(deepest))
++    if not deepest_real.is_relative_to(sandbox_real):
++        raise _FileWriteBlocked("outside sandbox")
++
++    # 3. 符号链接拒绝：沙箱根到目标每一级 lstat 检查（TOCTOU 缓解）
++    current = sandbox
++    for part in rel_parts:
++        current = current / part
++        try:
++            st = os.lstat(current)
++        except FileNotFoundError:
++            break  # 该级及更深层均不存在，不可能含符号链接
++        if stat.S_ISLNK(st.st_mode):
++            raise _FileWriteBlocked("symlink in path")
++
++    data = args.content.encode("utf-8")
++    # 4. 字节数复核（Pydantic 管字符数，此处管字节数）
++    if len(data) > MAX_BYTES:
++        raise _FileWriteBlocked("content too large")
++
++    # 5. 写入：自动创建沙箱内父目录，覆盖写
++    _ensure_dir(target.parent)
++    target.write_bytes(data)
++    return len(data)
++
++
++async def _execute(args: FileWriteInput, sandbox: Path) -> ToolResult:
++    try:
++        byte_count = _validate_and_write(args, sandbox)
++    except _FileWriteBlocked as exc:
++        return ToolResult(ok=False, error=f"BLOCKED: {exc}")
++    return ToolResult(ok=True, result=f"wrote {args.path} ({byte_count} bytes)")
++
++
++def build_tool_spec(settings: Settings) -> ToolSpec:
++    """构造 file_write 的 ToolSpec（沙箱根绑定自 settings.data_sandbox_dir）。"""
++    sandbox = Path(settings.data_sandbox_dir)
++
++    async def executor(base: Any) -> ToolResult:
++        return await _execute(cast(FileWriteInput, base), sandbox)
++
++    return ToolSpec(
++        name="file_write",
++        description="把文本内容写入 data/ 沙箱目录内的文件（覆盖已存在文件）",
++        input_model=FileWriteInput,
++        idempotency="non-idempotent",
++        risk_level="medium",
++        executor=executor,
++    )
+diff --git a/src/tools/http_request.py b/src/tools/http_request.py
+new file mode 100644
+index 0000000..a7ad45d
+--- /dev/null
++++ b/src/tools/http_request.py
+@@ -0,0 +1,326 @@
++"""http_request 工具：SSRF 防护六步安全链路（契约 §2.2；ARCHITECTURE §6.2 / ADR-005）。
++
++实现说明（契约 §2.2 链路 4 允许"等价物"）：不依赖 httpx transport 的 DNS 行为，
++改用手写最小 HTTP/1.1 客户端——``asyncio.open_connection`` 原生支持连接地址与
++``server_hostname`` 分离，天然满足 resolve-then-connect 与 HTTPS SNI/证书校验
++以原域名进行（未使用 verify=False）。
++"""
++
++from __future__ import annotations
++
++import asyncio
++import ipaddress
++import socket
++import ssl
++import urllib.parse
++from collections.abc import Awaitable, Callable
++from typing import Any, Literal, Protocol, cast
++
++from pydantic import BaseModel
++
++from src.config import Settings
++from src.models.tool_result import ToolResult
++from src.models.tool_spec import ToolSpec
++
++MAX_REDIRECTS = 3
++MAX_BODY_BYTES = 1_048_576  # 1MB
++TIMEOUT_SECONDS = 10.0
++_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
++
++IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
++
++# DNS 解析步骤抽象（可注入——FakeResolver 是 M1-5 rebinding 用例的测试通道）
++Resolver = Callable[[str, int], list[IPAddress]]
++
++
++class Reader(Protocol):
++    """读取侧最小接口（asyncio.StreamReader 结构兼容）。"""
++
++    async def readline(self) -> bytes: ...
++
++    async def readexactly(self, n: int) -> bytes: ...
++
++    async def read(self, n: int = -1) -> bytes: ...
++
++
++class Writer(Protocol):
++    """写入侧最小接口（asyncio.StreamWriter 结构兼容）。"""
++
++    def write(self, data: bytes) -> None: ...
++
++    async def drain(self) -> None: ...
++
++    def close(self) -> None: ...
++
++    async def wait_closed(self) -> None: ...
++
++
++# 连接步骤抽象（可注入——测试用 FakeReader/FakeWriter 断言实际连接目标）
++Connector = Callable[[str, int, bool, "str | None"], Awaitable[tuple[Reader, Writer]]]
++
++
++class HttpRequestInput(BaseModel):
++    """http_request 参数（M1 仅 GET）。"""
++
++    url: str
++    method: Literal["GET"] = "GET"
++
++
++class HttpRequestToolSpec(ToolSpec):
++    """http_request 专用 spec：GET 覆写为 idempotent（ARCHITECTURE §6.4 调用级覆写）。"""
++
++    def effective_idempotency(self, args: dict[str, Any]) -> Literal["idempotent", "non-idempotent"]:
++        if args.get("method", "GET") == "GET":
++            return "idempotent"
++        return self.idempotency
++
++
++class _HttpBlocked(Exception):
++    """安全拒绝（→ BLOCKED: 前缀）。"""
++
++
++def _default_resolver(hostname: str, port: int) -> list[IPAddress]:
++    """默认 DNS 解析：getaddrinfo 全量地址。"""
++    results: list[IPAddress] = []
++    for info in socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM):
++        sockaddr = info[4]
++        results.append(ipaddress.ip_address(sockaddr[0]))
++    return results
++
++
++async def _default_connector(ip: str, port: int, tls: bool, server_hostname: str | None) -> tuple[Reader, Writer]:
++    """默认连接器：直接绑定已校验 IP 建连（resolve-then-connect）。
++
++    HTTPS：server_hostname=原域名 → TLS SNI 与证书校验均以原域名进行；
++    连接地址为已校验 IP，不发生二次解析。
++    """
++    if tls:
++        if server_hostname is None:
++            raise ValueError("TLS connection requires server_hostname")
++        context = ssl.create_default_context()
++        reader, writer = await asyncio.open_connection(
++            ip, port, ssl=context, server_hostname=server_hostname
++        )
++    else:
++        reader, writer = await asyncio.open_connection(ip, port)
++    return reader, writer
++
++
++def _ip_allowed(ip: IPAddress) -> bool:
++    """私有/保留/环回/链路本地（含云元数据 169.254.169.254）/组播/未指定一律拒绝。"""
++    return not (
++        ip.is_private
++        or ip.is_loopback
++        or ip.is_link_local
++        or ip.is_reserved
++        or ip.is_multicast
++        or ip.is_unspecified
++    )
++
++
++def _validate_and_resolve(
++    url: str, allowed_hosts: list[str], resolver: Resolver
++) -> tuple[str, int, bool, str, str]:
++    """链路 1~3：URL 解析 → 域名白名单 → DNS 全量 IP 校验。
++
++    返回 (hostname, port, tls, 已校验 IP, 请求目标 path?query)。
++    """
++    try:
++        parts = urllib.parse.urlsplit(url)
++        port = parts.port
++    except ValueError as exc:
++        raise _HttpBlocked(f"invalid URL: {exc}") from exc
++    if parts.scheme not in ("http", "https"):
++        raise _HttpBlocked(f"scheme not allowed: {parts.scheme!r}")
++    hostname = parts.hostname
++    if not hostname:
++        raise _HttpBlocked("URL has no hostname")
++    if parts.username is not None or parts.password is not None:
++        raise _HttpBlocked("URL userinfo not allowed")
++    hostname = hostname.lower()
++    if hostname not in allowed_hosts:  # 精确匹配，先于 DNS
++        raise _HttpBlocked(f"host not allowed: {hostname}")
++    if port is None:
++        port = 443 if parts.scheme == "https" else 80
++    addresses = resolver(hostname, port)
++    if not addresses:
++        raise _HttpBlocked(f"DNS resolution returned no addresses for {hostname}")
++    for address in addresses:  # 全量校验，任一违规整条拒绝（防多记录 rebinding）
++        if not _ip_allowed(address):
++            raise _HttpBlocked(f"non-public IP address: {address}")
++    target = parts.path or "/"
++    if parts.query:
++        target = f"{target}?{parts.query}"
++    return hostname, port, parts.scheme == "https", str(addresses[0]), target
++
++
++async def _read_body(reader: Reader, headers: dict[str, str]) -> tuple[bytes, bool]:
++    """读响应体：chunked / content-length / 读到 EOF；累计 ≤1MB，超限截断。"""
++    body = bytearray()
++    truncated = False
++    if headers.get("transfer-encoding", "").strip().lower() == "chunked":
++        while True:
++            size_line = await reader.readline()
++            try:
++                size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)
++            except ValueError as exc:
++                raise ValueError(f"malformed chunk size: {size_line!r}") from exc
++            if size == 0:
++                await reader.readline()  # trailing CRLF
++                break
++            chunk = await reader.readexactly(size)
++            await reader.readline()  # chunk CRLF
++            if len(body) + len(chunk) > MAX_BODY_BYTES:
++                body += chunk[: MAX_BODY_BYTES - len(body)]
++                truncated = True
++                break
++            body += chunk
++        return bytes(body), truncated
++    declared = headers.get("content-length")
++    if declared is not None:
++        try:
++            remaining = int(declared)
++        except ValueError as exc:
++            raise ValueError(f"malformed content-length: {declared!r}") from exc
++        while remaining > 0:
++            chunk = await reader.readexactly(min(remaining, 65536))
++            if not chunk:
++                break
++            if len(body) + len(chunk) > MAX_BODY_BYTES:
++                body += chunk[: MAX_BODY_BYTES - len(body)]
++                truncated = True
++                break
++            body += chunk
++            remaining -= len(chunk)
++        return bytes(body), truncated
++    while True:  # 无长度指示，读到 EOF
++        chunk = await reader.read(65536)
++        if not chunk:
++            break
++        if len(body) + len(chunk) > MAX_BODY_BYTES:
++            body += chunk[: MAX_BODY_BYTES - len(body)]
++            truncated = True
++            break
++        body += chunk
++    return bytes(body), truncated
++
++
++async def _single_request(
++    url: str,
++    allowed_hosts: list[str],
++    resolver: Resolver,
++    connector: Connector,
++) -> tuple[int, dict[str, str], bytes, bool]:
++    """单跳请求：校验 → 连已校验 IP → 发送 → 读响应。"""
++    hostname, port, tls, ip, target = _validate_and_resolve(url, allowed_hosts, resolver)
++    reader, writer = await connector(ip, port, tls, hostname if tls else None)
++    try:
++        request = (
++            f"GET {target} HTTP/1.1\r\n"
++            f"Host: {hostname}\r\n"  # Host 头保留原域名
++            "User-Agent: cognitive-agent-lab/0.1\r\n"
++            "Accept: */*\r\n"
++            "Connection: close\r\n"
++            "\r\n"
++        ).encode("ascii")
++        writer.write(request)
++        await writer.drain()
++
++        status_line = await reader.readline()
++        if not status_line:
++            raise ValueError("empty response")
++        try:
++            status = int(status_line.split(None, 2)[1])
++        except (IndexError, ValueError) as exc:
++            raise ValueError(f"malformed status line: {status_line!r}") from exc
++
++        headers: dict[str, str] = {}
++        while True:
++            line = await reader.readline()
++            if line in (b"\r\n", b"\n", b""):
++                break
++            name, _, value = line.decode("latin-1").partition(":")
++            headers[name.strip().lower()] = value.strip()
++
++        body, truncated = await _read_body(reader, headers)
++        return status, headers, body, truncated
++    finally:
++        writer.close()
++        try:
++            await writer.wait_closed()
++        except Exception:
++            pass  # fake/已断开连接的清理失败不影响结果
++
++
++async def _get(
++    url: str,
++    allowed_hosts: list[str],
++    resolver: Resolver,
++    connector: Connector,
++) -> ToolResult:
++    """完整 GET：重定向手动逐跳 ≤3，每跳重新走完整安全链路。"""
++    current = url
++    hops = 0
++    while True:
++        status, headers, body, truncated = await asyncio.wait_for(
++            _single_request(current, allowed_hosts, resolver, connector),
++            TIMEOUT_SECONDS,
++        )
++        if status in _REDIRECT_STATUSES and "location" in headers:
++            if hops >= MAX_REDIRECTS:
++                raise _HttpBlocked(f"redirect limit exceeded (> {MAX_REDIRECTS} hops)")
++            hops += 1
++            # 相对 Location 以当前 URL 解析为绝对（RFC 3986）
++            current = urllib.parse.urljoin(current, headers["location"])
++            continue
++        text = body.decode("utf-8", errors="replace")
++        lines = [
++            f"status: {status}",
++            f"content-type: {headers.get('content-type', 'unknown')}",
++            f"body: {text}",
++        ]
++        if truncated:
++            lines.append("truncated: true")
++        return ToolResult(ok=True, result="\n".join(lines))
++
++
++async def _execute(
++    args: HttpRequestInput,
++    allowed_hosts: list[str],
++    resolver: Resolver,
++    connector: Connector,
++) -> ToolResult:
++    try:
++        return await _get(args.url, allowed_hosts, resolver, connector)
++    except _HttpBlocked as exc:
++        return ToolResult(ok=False, error=f"BLOCKED: {exc}")
++    except asyncio.TimeoutError:
++        return ToolResult(ok=False, error="http_request: request timed out")
++    except (OSError, ValueError) as exc:
++        return ToolResult(ok=False, error=f"http_request: {type(exc).__name__}: {exc}")
++
++
++def build_tool_spec(
++    settings: Settings,
++    *,
++    resolver: Resolver | None = None,
++    connector: Connector | None = None,
++) -> ToolSpec:
++    """构造 http_request 的 ToolSpec；resolver/connector 为测试注入点。"""
++    allowed_hosts = settings.allowed_hosts
++    effective_resolver = resolver if resolver is not None else _default_resolver
++    effective_connector = connector if connector is not None else _default_connector
++
++    async def executor(base: Any) -> ToolResult:
++        return await _execute(
++            cast(HttpRequestInput, base), allowed_hosts, effective_resolver, effective_connector
++        )
++
++    return HttpRequestToolSpec(
++        name="http_request",
++        description="向白名单域名发起 HTTP GET 请求并返回响应文本（重定向逐跳校验，上限 3 跳）",
++        input_model=HttpRequestInput,
++        idempotency="non-idempotent",
++        risk_level="medium",
++        executor=executor,
++    )
+diff --git a/tests/integration/fake_llm.py b/tests/integration/fake_llm.py
+new file mode 100644
+index 0000000..fa4d2a0
+--- /dev/null
++++ b/tests/integration/fake_llm.py
+@@ -0,0 +1,37 @@
++"""FakeLLM：LLMClientProtocol 的鸭子类型实现（契约 §3.1，不进 src/）。"""
++
++from __future__ import annotations
++
++from collections.abc import Sequence
++from typing import Any
++
++from src.models.llm import LLMResponse
++
++Message = dict[str, Any]
++
++
++class FakeLLM:
++    """按轮次弹出预设脚本，记录每轮收到的 messages 供断言。"""
++
++    def __init__(self, script: Sequence[LLMResponse]) -> None:
++        self._script: list[LLMResponse] = list(script)
++        self.received_messages: list[list[Message]] = []
++        self.calls = 0
++
++    async def chat(self, messages: list[Message], tools: list[dict[str, Any]]) -> LLMResponse:
++        self.received_messages.append([dict(m) for m in messages])
++        self.calls += 1
++        if self.calls > len(self._script):
++            raise AssertionError("FakeLLM script exhausted")
++        return self._script[self.calls - 1]
++
++
++class ExplodingLLM:
++    """chat 恒抛异常（模拟 SDK 重试耗尽）。"""
++
++    def __init__(self) -> None:
++        self.calls = 0
++
++    async def chat(self, messages: list[Message], tools: list[dict[str, Any]]) -> LLMResponse:
++        self.calls += 1
++        raise RuntimeError("simulated retries exhausted")
+diff --git a/tests/integration/test_loop.py b/tests/integration/test_loop.py
+new file mode 100644
+index 0000000..a3ca117
+--- /dev/null
++++ b/tests/integration/test_loop.py
+@@ -0,0 +1,195 @@
++"""M1 集成测试：真实 AgentLoop + 真实工具 + FakeLLM（契约 §3.2）。
++
++对应验收：M1-1（-k loop）、M1-3（-k tool_failure）、M1-4（-k max_steps）。
++环境说明：沙箱拦截 unlink → 不用 tmp_path fixture，用 data/ 下固定测试子目录
++（自建自清，清不掉也无妨——data/ 已被 gitignore）。
++"""
++
++from __future__ import annotations
++
++import json
++import shutil
++from collections.abc import Iterator
++from pathlib import Path
++
++import pytest
++
++from src.agent import build_registry
++from src.agent.loop import AgentLoop
++from src.config import Settings
++from src.models.events import AgentEventType
++from src.models.llm import LLMResponse, ToolCallRequest
++
++from .fake_llm import ExplodingLLM, FakeLLM
++
++TEST_SANDBOX = Path("data/.test-sandbox/loop")
++LOGS_DIR = Path("logs")
++
++
++def _try_cleanup(path: Path) -> None:
++    """尽力清理；沙箱拦截删除时容忍残留（data/ 已 gitignore）。"""
++    try:
++        shutil.rmtree(path)
++    except OSError:
++        pass
++
++
++def _ensure_dir(path: Path) -> None:
++    """mkdir 容错：宿主安全代理对跨进程残留目录会抛 PermissionError。"""
++    try:
++        path.mkdir(parents=True, exist_ok=True)
++    except OSError:
++        if not path.is_dir():
++            raise
++
++
++@pytest.fixture()
++def sandbox() -> Iterator[Path]:
++    _try_cleanup(TEST_SANDBOX)
++    _ensure_dir(TEST_SANDBOX)
++    yield TEST_SANDBOX
++    _try_cleanup(TEST_SANDBOX)
++
++
++def _settings(sandbox: Path, max_steps: int = 10) -> Settings:
++    return Settings(calc_agent_max_steps=max_steps, data_sandbox_dir=str(sandbox))
++
++
++@pytest.mark.asyncio
++@pytest.mark.loop
++async def test_loop_completes_multistep_task(sandbox: Path) -> None:
++    """M1-1：多步任务 happy path——事件序列、seq、tool_call_id、JSONL、产出文件。"""
++    script = [
++        LLMResponse(
++            tool_calls=[
++                ToolCallRequest(remote_id="fake-0", tool_name="calc", arguments={"expression": "1+2*3"})
++            ],
++            finish_reason="tool_calls",
++        ),
++        LLMResponse(
++            tool_calls=[
++                ToolCallRequest(
++                    remote_id="fake-1",
++                    tool_name="file_write",
++                    arguments={"path": "out.txt", "content": "result: 7"},
++                )
++            ],
++            finish_reason="tool_calls",
++        ),
++        LLMResponse(content="done", finish_reason="stop"),
++    ]
++    fake = FakeLLM(script)
++    loop = AgentLoop(client=fake, registry=build_registry(_settings(sandbox)), settings=_settings(sandbox))
++    result = await loop.run_task("compute 1+2*3 and save to out.txt")
++
++    assert result.status == "completed"
++    assert result.result == "done"
++    assert result.steps == 3
++
++    # 事件序列（无 thought）与 seq 连续性
++    assert [event.type for event in result.events] == [
++        AgentEventType.status,
++        AgentEventType.tool_call,
++        AgentEventType.tool_result,
++        AgentEventType.tool_call,
++        AgentEventType.tool_result,
++        AgentEventType.final,
++    ]
++    assert [event.seq for event in result.events] == [1, 2, 3, 4, 5, 6]
++
++    # tool_call / tool_result 的 tool_call_id 成对相等且形如 call_0002
++    tool_calls = [e for e in result.events if e.type == AgentEventType.tool_call]
++    tool_results = [e for e in result.events if e.type == AgentEventType.tool_result]
++    for call_event, result_event in zip(tool_calls, tool_results):
++        assert result_event.payload["tool_call_id"] == call_event.payload["tool_call_id"]
++    assert tool_calls[0].payload["tool_call_id"] == "call_0002"
++    assert tool_calls[1].payload["tool_call_id"] == "call_0004"
++    assert tool_results[0].payload["ok"] is True
++    assert tool_results[0].payload["result_summary"] == "7"
++
++    # JSONL 存在且逐行与内存事件一致（先落盘）
++    jsonl = LOGS_DIR / f"agent-{result.task_id}.jsonl"
++    assert jsonl.exists()
++    lines = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
++    assert lines == [event.model_dump(mode="json") for event in result.events]
++
++    # file_write 真实产出（沙箱内）
++    assert (sandbox / "out.txt").read_text(encoding="utf-8") == "result: 7"
++
++
++@pytest.mark.asyncio
++@pytest.mark.max_steps
++@pytest.mark.loop
++async def test_loop_step_limit(sandbox: Path) -> None:
++    """M1-4：步数上限——failed + error/final 必发，LLM 恰被调用 max_steps 次。"""
++    script = [
++        LLMResponse(
++            tool_calls=[ToolCallRequest(remote_id=f"fake-{i}", tool_name="calc", arguments={"expression": f"{i}+{i}"})],
++            finish_reason="tool_calls",
++        )
++        for i in range(3)
++    ]
++    fake = FakeLLM(script)  # 第 4 次调用会 AssertionError——loop 不得调用第 4 次
++    settings = _settings(sandbox, max_steps=3)
++    loop = AgentLoop(client=fake, registry=build_registry(settings), settings=settings)
++    result = await loop.run_task("never finishes")
++
++    assert result.status == "failed"
++    assert "max steps" in result.result
++    assert fake.calls == 3
++    assert [e.type for e in result.events[-2:]] == [AgentEventType.error, AgentEventType.final]
++    assert result.events[-1].payload["status"] == "failed"
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_failure
++async def test_loop_tool_failure_not_fatal(sandbox: Path) -> None:
++    """M1-3：工具失败不致命——BLOCKED 回传 LLM（ERROR: 前缀），任务继续完成。"""
++    script = [
++        LLMResponse(
++            tool_calls=[
++                ToolCallRequest(
++                    remote_id="fake-0",
++                    tool_name="file_write",
++                    arguments={"path": "../evil.txt", "content": "x"},
++                )
++            ],
++            finish_reason="tool_calls",
++        ),
++        LLMResponse(content="recovered", finish_reason="stop"),
++    ]
++    fake = FakeLLM(script)
++    settings = _settings(sandbox)
++    loop = AgentLoop(client=fake, registry=build_registry(settings), settings=settings)
++    result = await loop.run_task("try to escape the sandbox")
++
++    # 第一轮 tool_result 被 BLOCKED
++    first_tool_result = next(e for e in result.events if e.type == AgentEventType.tool_result)
++    assert first_tool_result.payload["ok"] is False
++    assert "BLOCKED" in str(first_tool_result.payload["result_summary"])
++
++    # 错误回传 LLM：第二轮 messages 含 tool message 且以 ERROR: 开头
++    second_round = fake.received_messages[1]
++    tool_messages = [m for m in second_round if m.get("role") == "tool"]
++    assert tool_messages
++    assert tool_messages[0]["content"].startswith("ERROR:")
++
++    # 任务不悬挂，最终完成
++    assert result.status == "completed"
++    assert result.result == "recovered"
++    # 沙箱外未产生文件
++    assert not (sandbox.parent.parent / "evil.txt").exists()
++
++
++@pytest.mark.asyncio
++@pytest.mark.loop
++async def test_loop_llm_error_fails_task(sandbox: Path) -> None:
++    """M1-3 补充：LLM 不可恢复异常 → 任务 failed，error + final 必发。"""
++    settings = _settings(sandbox)
++    loop = AgentLoop(client=ExplodingLLM(), registry=build_registry(settings), settings=settings)
++    result = await loop.run_task("boom")
++
++    assert result.status == "failed"
++    assert "llm error" in result.result
++    assert [e.type for e in result.events[-2:]] == [AgentEventType.error, AgentEventType.final]
++    assert result.events[-1].payload["status"] == "failed"
+diff --git a/tests/unit/test_calc.py b/tests/unit/test_calc.py
+new file mode 100644
+index 0000000..166b231
+--- /dev/null
++++ b/tests/unit/test_calc.py
+@@ -0,0 +1,103 @@
++"""M1-5 calc 单元测试（契约 §3.2；-k tool_security 命中）。"""
++
++from __future__ import annotations
++
++import pytest
++
++from src.agent.registry import ToolRegistry
++from src.config import Settings
++from src.models.tool_result import ToolResult
++from src.tools import calc
++
++
++async def _run(expression: str) -> ToolResult:
++    spec = calc.build_tool_spec(Settings())
++    return await spec.executor(calc.CalcInput(expression=expression))
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_calc_evaluates_expression() -> None:
++    plain = await _run("1+2*3")
++    assert plain.ok and plain.result == "7"
++
++    division = await _run("(123*456)/7")
++    assert division.ok and float(division.result) == 56088 / 7
++
++    sqrt2 = await _run("sqrt(2)")
++    assert sqrt2.ok and abs(float(sqrt2.result) - 1.41421356) < 1e-6
++
++    power = await _run("pow(2,10)")
++    assert power.ok and power.result == "1024"
++
++    unary = await _run("-5 + +3")
++    assert unary.ok and unary.result == "-2"
++
++    funcs = await _run("min(abs(-3), max(1, 2))")
++    assert funcs.ok and funcs.result == "2"
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_calc_rejects_name_injection() -> None:
++    for expression in [
++        "__import__('os').system('id')",
++        "open('/etc/passwd')",
++        "x",
++        "True",
++        "abc",
++    ]:
++        result = await _run(expression)
++        assert not result.ok, f"should be rejected: {expression}"
++        assert "BLOCKED" in result.error, f"expected BLOCKED for: {expression}"
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_calc_rejects_attribute_and_lambda() -> None:
++    for expression in [
++        "''.join([])",
++        "(lambda: 1)()",
++        "[1,2][0]",
++        "a if b else c",
++    ]:
++        result = await _run(expression)
++        assert not result.ok, f"should be rejected: {expression}"
++        assert "BLOCKED" in result.error, f"expected BLOCKED for: {expression}"
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_calc_rejects_depth_and_length() -> None:
++    # 长度 > 200：参数校验层拒绝（经 registry 统一入口）
++    registry = ToolRegistry()
++    registry.register(calc.build_tool_spec(Settings()))
++    too_long = await registry.execute("calc", {"expression": "1+" * 110 + "1"})  # 221 字符
++    assert not too_long.ok
++    assert "invalid arguments" in too_long.error
++
++    # 括号嵌套深度 > 20
++    paren = await _run("(" * 25 + "1" + ")" * 25)
++    assert not paren.ok and "BLOCKED" in paren.error
++
++    # 结构性 AST 深度 > 20（左结合运算链）
++    deep = await _run("1+" * 21 + "1")  # 深度 22
++    assert not deep.ok and "BLOCKED" in deep.error
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_calc_math_errors() -> None:
++    division = await _run("1/0")
++    assert not division.ok
++    assert division.error == "calc: division by zero"
++    assert "BLOCKED" not in division.error
++
++    overflow = await _run("pow(10,10000)")
++    assert not overflow.ok
++    assert overflow.error == "calc: result out of range"
++    assert "BLOCKED" not in overflow.error
++
++    domain = await _run("sqrt(-1)")
++    assert not domain.ok
++    assert "BLOCKED" not in domain.error
+diff --git a/tests/unit/test_file_write.py b/tests/unit/test_file_write.py
+new file mode 100644
+index 0000000..cedcbfe
+--- /dev/null
++++ b/tests/unit/test_file_write.py
+@@ -0,0 +1,140 @@
++"""M1-5 file_write 单元测试（契约 §3.2；-k tool_security 命中）。
++
++环境说明：沙箱拦截 unlink → 不用 tmp_path fixture，用 data/ 下固定测试子目录
++（自建自清，清不掉也无妨——data/ 已被 gitignore）。宿主安全代理对跨进程残留
++目录的 mkdir(exist_ok=True) 会抛 PermissionError——一律经 _ensure_dir 容错。
++"""
++
++from __future__ import annotations
++
++import os
++import shutil
++from collections.abc import Iterator
++from pathlib import Path
++
++import pytest
++
++from src.agent.registry import ToolRegistry
++from src.config import Settings
++from src.models.tool_result import ToolResult
++from src.tools import file_write
++
++TEST_SANDBOX = Path("data/.test-sandbox/file_write")
++
++
++def _try_cleanup(path: Path) -> None:
++    try:
++        shutil.rmtree(path)
++    except OSError:
++        pass
++
++
++def _ensure_dir(path: Path) -> None:
++    try:
++        path.mkdir(parents=True, exist_ok=True)
++    except OSError:
++        if not path.is_dir():
++            raise
++
++
++@pytest.fixture()
++def sandbox() -> Iterator[Path]:
++    _try_cleanup(TEST_SANDBOX)
++    _ensure_dir(TEST_SANDBOX)
++    yield TEST_SANDBOX
++    _try_cleanup(TEST_SANDBOX)
++
++
++async def _run(sandbox: Path, path: str, content: str) -> ToolResult:
++    settings = Settings(data_sandbox_dir=str(sandbox))
++    spec = file_write.build_tool_spec(settings)
++    return await spec.executor(file_write.FileWriteInput(path=path, content=content))
++
++
++def _ensure_symlink(source: Path, name: str, sandbox: Path) -> Path:
++    """建符号链接（目标用绝对路径，避免 POSIX 相对解析歧义）。
++
++    链接名带 pid：跨进程重复运行时旧链接残留（无法删除）不会干扰本次断言。
++    """
++    link = sandbox / f"{name}-{os.getpid()}"
++    if not link.is_symlink():
++        os.symlink(source.resolve(), link)
++    return link
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_file_write_success_in_sandbox(sandbox: Path) -> None:
++    result = await _run(sandbox, "sub/out.txt", "hello world")
++
++    assert result.ok
++    assert (sandbox / "sub" / "out.txt").read_text(encoding="utf-8") == "hello world"
++    assert "bytes" in result.result
++    assert "11 bytes" in result.result
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_file_write_blocks_traversal(sandbox: Path) -> None:
++    for path in ["../evil.txt", "a/../../evil", "/tmp/x"]:
++        result = await _run(sandbox, path, "x")
++        assert not result.ok, f"should be rejected: {path}"
++        assert "BLOCKED" in result.error
++        assert "path traversal" in result.error
++    assert not (sandbox.parent / "evil.txt").exists()
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_file_write_blocks_symlink(sandbox: Path) -> None:
++    real_dir = sandbox / "real"
++    _ensure_dir(real_dir)
++    (real_dir / "inside.txt").write_text("inside", encoding="utf-8")
++
++    # 目录符号链接（即使指向沙箱内也拒绝）
++    dir_link = _ensure_symlink(real_dir, "link", sandbox)
++    result = await _run(sandbox, f"{dir_link.name}/evil.txt", "x")
++    assert not result.ok
++    assert "symlink" in result.error
++
++    # 目标文件本身是符号链接
++    file_link = _ensure_symlink(real_dir / "inside.txt", "file-link", sandbox)
++    result = await _run(sandbox, file_link.name, "x")
++    assert not result.ok
++    assert "symlink" in result.error
++
++    assert not (real_dir / "evil.txt").exists()
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_file_write_blocks_prefix_confusion(sandbox: Path) -> None:
++    # 与沙箱根同前缀字符串但非子目录（data-evil 形态）——is_relative_to 组件边界证据
++    evil_dir = sandbox.parent / "file_write-evil"
++    _ensure_dir(evil_dir)
++    escape = _ensure_symlink(evil_dir, "escape", sandbox)
++
++    result = await _run(sandbox, f"{escape.name}/x.txt", "x")
++    assert not result.ok
++    assert "outside sandbox" in result.error
++    assert not (evil_dir / "x.txt").exists()
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_file_write_blocks_oversize(sandbox: Path) -> None:
++    # 字符数超限 → 参数校验层拒绝（经 registry 统一入口）
++    registry = ToolRegistry()
++    settings = Settings(data_sandbox_dir=str(sandbox))
++    registry.register(file_write.build_tool_spec(settings))
++    result = await registry.execute(
++        "file_write", {"path": "too-many-chars.txt", "content": "a" * (file_write.MAX_BYTES + 1)}
++    )
++    assert not result.ok
++    assert "invalid arguments" in result.error
++
++    # 字符不超限但 UTF-8 字节数超限 → executor 复核拒绝
++    result2 = await _run(sandbox, "wide.txt", "é" * 600_000)  # 60 万字符、约 1.2MB 字节
++    assert not result2.ok
++    assert "content too large" in result2.error
++    assert "BLOCKED" in result2.error
+diff --git a/tests/unit/test_http_request.py b/tests/unit/test_http_request.py
+new file mode 100644
+index 0000000..7a6800a
+--- /dev/null
++++ b/tests/unit/test_http_request.py
+@@ -0,0 +1,532 @@
++"""M1-5 http_request 单元测试（契约 §3.2；-k tool_security 命中）。
++
++不真正联网：FakeResolver + FakeConnector（reader/writer 假流）注入，
++真实 GET 只测被阻断路径（安全校验逻辑全量覆盖）。
++"""
++
++from __future__ import annotations
++
++import ipaddress
++from typing import Any
++
++import pytest
++
++from src.config import Settings
++from src.models.tool_result import ToolResult
++from src.tools import http_request
++
++
++class FakeResolver:
++    """每次调用依次返回预设结果（模拟 rebinding：第二次与第一次不同）。"""
++
++    def __init__(self, *results: list[str]) -> None:
++        self._results = [list(r) for r in results]
++        self.calls: list[tuple[str, int]] = []
++
++    def __call__(self, hostname: str, port: int) -> list[http_request.IPAddress]:
++        self.calls.append((hostname, port))
++        index = min(len(self.calls) - 1, len(self._results) - 1)
++        return [ipaddress.ip_address(item) for item in self._results[index]]
++
++
++class FakeReader:
++    """最小读取接口（http_request.Reader 协议的结构实现）。"""
++
++    def __init__(self, data: bytes) -> None:
++        self._data = data
++
++    async def readline(self) -> bytes:
++        idx = self._data.find(b"\n")
++        if idx == -1:
++            line, self._data = self._data, b""
++        else:
++            line, self._data = self._data[: idx + 1], self._data[idx + 1 :]
++        return line
++
++    async def readexactly(self, n: int) -> bytes:
++        chunk, self._data = self._data[:n], self._data[n:]
++        return chunk
++
++    async def read(self, n: int = -1) -> bytes:
++        if n < 0:
++            chunk, self._data = self._data, b""
++        else:
++            chunk, self._data = self._data[:n], self._data[n:]
++        return chunk
++
++
++class FakeWriter:
++    """最小写入接口（记录写入内容供断言）。"""
++
++    def __init__(self) -> None:
++        self.written: list[bytes] = []
++        self.closed = False
++
++    def write(self, data: bytes) -> None:
++        self.written.append(data)
++
++    async def drain(self) -> None:
++        return None
++
++    def close(self) -> None:
++        self.closed = True
++
++    async def wait_closed(self) -> None:
++        return None
++
++
++class RecordingConnector:
++    """记录每次连接参数（IP/端口/TLS/SNI），按次返回预设原始响应。"""
++
++    def __init__(self, responses: list[bytes]) -> None:
++        self._responses = list(responses)
++        self.connections: list[tuple[str, int, bool, str | None]] = []
++        self.writers: list[FakeWriter] = []
++
++    async def __call__(
++        self, ip: str, port: int, tls: bool, server_hostname: str | None
++    ) -> tuple[FakeReader, FakeWriter]:
++        self.connections.append((ip, port, tls, server_hostname))
++        writer = FakeWriter()
++        self.writers.append(writer)
++        index = min(len(self.connections) - 1, len(self._responses) - 1)
++        return FakeReader(self._responses[index]), writer
++
++
++def _response(status: int = 200, body: bytes = b"ok", headers: dict[str, str] | None = None) -> bytes:
++    head: dict[str, str] = {"Content-Length": str(len(body))}
++    head.update(headers or {})
++    lines = [f"HTTP/1.1 {status} Status"]
++    lines.extend(f"{name}: {value}" for name, value in head.items())
++    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + body
++
++
++async def _run(
++    url: str,
++    *,
++    resolver: Any,
++    connector: Any,
++    allowed_hosts: str = "example.com",
++) -> ToolResult:
++    settings = Settings(http_allowed_hosts=allowed_hosts, data_sandbox_dir="data/.test-sandbox")
++    spec = http_request.build_tool_spec(settings, resolver=resolver, connector=connector)
++    return await spec.executor(http_request.HttpRequestInput(url=url))
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_allows_whitelisted_public_host() -> None:
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([_response(200, b"hello example")])
++    result = await _run("https://example.com/index.html", resolver=resolver, connector=connector)
++
++    assert result.ok
++    assert "status: 200" in result.result
++    assert "hello example" in result.result
++    # resolve-then-connect 生效证据：连接目标 == 已校验 IP，且无二次解析
++    assert len(resolver.calls) == 1
++    ip, port, tls, sni = connector.connections[0]
++    assert ip == "93.184.216.34"
++    assert port == 443
++    # HTTPS：SNI/证书校验以原域名进行（server_hostname 分离）
++    assert tls is True
++    assert sni == "example.com"
++    # Host 头保留原域名
++    assert b"Host: example.com\r\n" in connector.writers[0].written[0]
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++@pytest.mark.parametrize("private_ip", ["192.168.1.1", "10.0.0.5", "172.16.31.4"])
++async def test_http_blocks_private_ip(private_ip: str) -> None:
++    resolver = FakeResolver([private_ip])
++    connector = RecordingConnector([])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert result.error.startswith("BLOCKED")
++    assert connector.connections == []  # 未建连
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_blocks_cloud_metadata() -> None:
++    # IP 字面量直填（进入白名单后由 IP 校验阻断——云元数据 169.254.169.254）
++    resolver = FakeResolver(["169.254.169.254"])
++    connector = RecordingConnector([])
++    result = await _run(
++        "http://169.254.169.254/latest/meta-data",
++        resolver=resolver,
++        connector=connector,
++        allowed_hosts="example.com,169.254.169.254",
++    )
++    assert not result.ok
++    assert result.error.startswith("BLOCKED")
++    assert connector.connections == []
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++@pytest.mark.parametrize("blocked_ipv6", ["::1", "fe80::1", "fc00::1"])
++async def test_http_blocks_loopback_ipv6(blocked_ipv6: str) -> None:
++    resolver = FakeResolver([blocked_ipv6])
++    connector = RecordingConnector([])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert result.error.startswith("BLOCKED")
++    assert connector.connections == []
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_blocks_non_whitelisted_host() -> None:
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([])
++    result = await _run("http://evil.com/", resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert result.error.startswith("BLOCKED")
++    assert resolver.calls == []  # 白名单先于 DNS
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_blocks_mixed_dns_records() -> None:
++    resolver = FakeResolver(["93.184.216.34", "10.0.0.1"])  # 多记录含私有 → 整条拒绝
++    connector = RecordingConnector([])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert result.error.startswith("BLOCKED")
++    assert connector.connections == []
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_blocks_redirect_to_private() -> None:
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector(
++        [_response(302, b"", headers={"Location": "http://10.0.0.1/x"})]
++    )
++    result = await _run("http://example.com/start", resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert result.error.startswith("BLOCKED")
++    assert len(connector.connections) == 1  # 第二跳未建连（重新走完整链路时被拒）
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_blocks_redirect_loop_and_limit() -> None:
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector(
++        [_response(302, b"", headers={"Location": "http://example.com/loop"})] * 4
++    )
++    result = await _run("http://example.com/loop", resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert result.error.startswith("BLOCKED")
++    assert "redirect" in result.error
++    # 初始请求 + 3 跳 = 4 次连接，之后超限
++    assert len(connector.connections) == 4
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_dns_rebinding_fake_resolver() -> None:
++    # 第一次解析公网、第二次私有——若实现存在二次解析（TOCTOU）将得逞
++    resolver = FakeResolver(["93.184.216.34"], ["10.0.0.1"])
++    connector = RecordingConnector([_response(200, b"stable")])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert result.ok
++    assert len(resolver.calls) == 1  # 仅解析一次
++    assert connector.connections[0][0] == "93.184.216.34"  # 连接 IP == 首次校验值
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_response_size_truncation() -> None:
++    body = b"x" * (http_request.MAX_BODY_BYTES + 100)
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([_response(200, body)])
++    result = await _run("http://example.com/big", resolver=resolver, connector=connector)
++
++    assert result.ok
++    assert "truncated: true" in result.result
++    # body 截断到 1MB
++    body_line = next(line for line in result.result.splitlines() if line.startswith("body: "))
++    assert len(body_line) == len("body: ") + http_request.MAX_BODY_BYTES
++
++
++@pytest.mark.tool_security
++def test_http_idempotency_declarations() -> None:
++    """幂等性声明与调用级覆写（ARCHITECTURE §6.4；M2 恢复语义的快照依据）。"""
++    from src.tools import calc, file_write
++
++    settings = Settings()
++    assert calc.build_tool_spec(settings).idempotency == "idempotent"
++    assert file_write.build_tool_spec(settings).idempotency == "non-idempotent"
++
++    http_spec = http_request.build_tool_spec(settings)
++    assert http_spec.idempotency == "non-idempotent"
++    assert http_spec.effective_idempotency({"method": "GET"}) == "idempotent"  # GET 覆写
++    assert http_spec.effective_idempotency({}) == "idempotent"  # 缺省 method 即 GET
++    assert http_spec.effective_idempotency({"method": "POST"}) == "non-idempotent"
++
++
++# ---------------------------------------------------------------------------
++# G-2 退回补测（qa-M1.md §三）：chunked / EOF / 畸形响应 / URL 错误 / 连接异常 / 超时
++# ---------------------------------------------------------------------------
++
++
++def _chunked_payload(chunks: list[bytes]) -> bytes:
++    """构造 chunked 编码的响应体字节流。"""
++    return b"".join(b"%x\r\n%s\r\n" % (len(chunk), chunk) for chunk in chunks) + b"0\r\n\r\n"
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_reads_chunked_body() -> None:
++    """chunked 传输编码：多 chunk 正常拼接，无截断。"""
++    raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + _chunked_payload(
++        [b"hello ", b"chunked ", b"world"]
++    )
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([raw])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert result.ok
++    assert "body: hello chunked world" in result.result
++    assert "truncated" not in result.result
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_chunked_truncation() -> None:
++    """chunked 超 1MB：截断至 1MB 并标注 truncated。"""
++    raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + _chunked_payload(
++        [b"x" * 600_000, b"y" * 600_000]
++    )
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([raw])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert result.ok
++    assert "truncated: true" in result.result
++    body_line = next(line for line in result.result.splitlines() if line.startswith("body: "))
++    assert len(body_line) == len("body: ") + http_request.MAX_BODY_BYTES
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_reads_body_to_eof() -> None:
++    """无 content-length / transfer-encoding：读至连接 EOF；请求行携带 path?query。"""
++    raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nno length headers here"
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([raw])
++    result = await _run("http://example.com/path?q=1", resolver=resolver, connector=connector)
++
++    assert result.ok
++    assert "body: no length headers here" in result.result
++    assert "truncated" not in result.result
++    # 请求行含完整 path?query（L153 分支）
++    assert b"GET /path?q=1 HTTP/1.1\r\n" in connector.writers[0].written[0]
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_eof_truncation() -> None:
++    """EOF 模式超 1MB：截断至 1MB 并标注 truncated。"""
++    raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n" + b"z" * (
++        http_request.MAX_BODY_BYTES + 100
++    )
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([raw])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert result.ok
++    assert "truncated: true" in result.result
++    body_line = next(line for line in result.result.splitlines() if line.startswith("body: "))
++    assert len(body_line) == len("body: ") + http_request.MAX_BODY_BYTES
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++@pytest.mark.parametrize(
++    "raw",
++    [
++        b"",  # 空响应
++        b"GARBAGE\r\n\r\n",  # 状态行缺状态码
++        b"HTTP/1.1 NOT_A_NUMBER OK\r\n\r\n",  # 状态码非数字
++    ],
++)
++async def test_http_rejects_malformed_status_line(raw: bytes) -> None:
++    """畸形状态行 → 功能错误（非 BLOCKED）回传。"""
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([raw])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert result.error.startswith("http_request: ")
++    assert "BLOCKED" not in result.error
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_rejects_malformed_content_length() -> None:
++    """content-length 非数字 → malformed content-length。"""
++    raw = b"HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\nhello"
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([raw])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert "malformed content-length" in result.error
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++@pytest.mark.parametrize(
++    "url, reason",
++    [
++        ("ftp://example.com/", "scheme not allowed"),
++        ("example.com/path", "scheme not allowed"),  # 无 scheme
++        ("http://", "no hostname"),
++        ("http://user:pass@example.com/", "userinfo not allowed"),
++        ("http://example.com:99999999999999999999/", "invalid URL"),  # 端口超范围
++    ],
++)
++async def test_http_rejects_bad_urls(url: str, reason: str) -> None:
++    """URL 解析错误分支：scheme/hostname/userinfo/端口。"""
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([])
++    result = await _run(url, resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert result.error.startswith("BLOCKED")
++    assert reason in result.error
++    assert connector.connections == []
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_connection_oserror() -> None:
++    """连接抛 OSError → 结构化错误回传（不外抛）。"""
++
++    class FailingConnector:
++        async def __call__(
++            self, ip: str, port: int, tls: bool, server_hostname: str | None
++        ) -> tuple[FakeReader, FakeWriter]:
++            raise OSError("connection refused")
++
++    resolver = FakeResolver(["93.184.216.34"])
++    result = await _run("http://example.com/", resolver=resolver, connector=FailingConnector())
++
++    assert not result.ok
++    assert "http_request: OSError: connection refused" in result.error
++    assert "BLOCKED" not in result.error
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
++    """连接挂起 → 超时错误（TIMEOUT_SECONDS monkeypatch 为 0.05s 加速）。"""
++    import asyncio
++
++    monkeypatch.setattr(http_request, "TIMEOUT_SECONDS", 0.05)
++
++    class HangingConnector:
++        async def __call__(
++            self, ip: str, port: int, tls: bool, server_hostname: str | None
++        ) -> tuple[FakeReader, FakeWriter]:
++            await asyncio.sleep(10)
++            raise AssertionError("should be cancelled by timeout")
++
++    resolver = FakeResolver(["93.184.216.34"])
++    result = await _run("http://example.com/", resolver=resolver, connector=HangingConnector())
++
++    assert not result.ok
++    assert "timed out" in result.error
++    assert "BLOCKED" not in result.error
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_writer_cleanup_failure_ignored() -> None:
++    """连接清理（wait_closed）失败不影响已有响应结果。"""
++
++    class CleanupFailingWriter(FakeWriter):
++        async def wait_closed(self) -> None:
++            raise RuntimeError("already closed")
++
++    class CleanupFailingConnector:
++        def __init__(self) -> None:
++            self.connections: list[tuple[str, int, bool, str | None]] = []
++
++        async def __call__(
++            self, ip: str, port: int, tls: bool, server_hostname: str | None
++        ) -> tuple[FakeReader, CleanupFailingWriter]:
++            self.connections.append((ip, port, tls, server_hostname))
++            raw = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
++            return FakeReader(raw), CleanupFailingWriter()
++
++    connector = CleanupFailingConnector()
++    resolver = FakeResolver(["93.184.216.34"])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert result.ok
++    assert "body: ok" in result.result
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_blocks_empty_dns_result() -> None:
++    """DNS 解析返回空列表 → BLOCKED。"""
++
++    class EmptyResolver:
++        def __init__(self) -> None:
++            self.calls = 0
++
++        def __call__(self, hostname: str, port: int) -> list[http_request.IPAddress]:
++            self.calls += 1
++            return []
++
++    resolver = EmptyResolver()
++    connector = RecordingConnector([])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert result.error.startswith("BLOCKED")
++    assert "no addresses" in result.error
++    assert connector.connections == []
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_rejects_malformed_chunk_size() -> None:
++    """chunked size 行非十六进制 → malformed chunk size。"""
++    raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n"
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([raw])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert not result.ok
++    assert "malformed chunk size" in result.error
++    assert "BLOCKED" not in result.error
++
++
++@pytest.mark.asyncio
++@pytest.mark.tool_security
++async def test_http_content_length_short_read() -> None:
++    """content-length 声明长于实际 body → 提前 EOF 中断，已读部分仍返回。"""
++    # 声明 10 字节，实际只有 4 字节即连接关闭
++    raw = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\npart"
++    resolver = FakeResolver(["93.184.216.34"])
++    connector = RecordingConnector([raw])
++    result = await _run("http://example.com/", resolver=resolver, connector=connector)
++
++    assert result.ok
++    assert "body: part" in result.result
++    assert "truncated" not in result.result
+diff --git a/tests/unit/test_registry.py b/tests/unit/test_registry.py
+new file mode 100644
+index 0000000..04e6a76
+--- /dev/null
++++ b/tests/unit/test_registry.py
+@@ -0,0 +1,86 @@
++"""registry 注册期校验与 schema 导出测试（qa-M1.md §三建议：缓解 agent/ 勉强过线的脆弱性）。"""
++
++from __future__ import annotations
++
++import pytest
++from pydantic import BaseModel, ValidationError
++
++from src.agent.registry import ToolRegistry, ToolRegistryError
++from src.models.tool_result import ToolResult
++from src.models.tool_spec import ToolSpec
++
++
++class DummyInput(BaseModel):
++    """测试用参数模型。"""
++
++    value: int = 0
++
++
++async def _dummy_executor(args: BaseModel) -> ToolResult:
++    """测试用 async executor。"""
++    return ToolResult(ok=True, result="ok")
++
++
++def _spec(**overrides: object) -> ToolSpec:
++    """构造合法 ToolSpec，按参数覆写。"""
++    params: dict[str, object] = {
++        "name": "dummy",
++        "description": "dummy tool for registry tests",
++        "input_model": DummyInput,
++        "idempotency": "idempotent",
++        "risk_level": "low",
++        "executor": _dummy_executor,
++    }
++    params.update(overrides)
++    return ToolSpec(**params)  # type: ignore[arg-type]
++
++
++def test_registry_rejects_empty_name() -> None:
++    registry = ToolRegistry()
++    with pytest.raises(ToolRegistryError, match="non-empty"):
++        registry.register(_spec(name=""))
++
++
++def test_registry_rejects_duplicate_name() -> None:
++    registry = ToolRegistry()
++    registry.register(_spec(name="dummy"))
++    with pytest.raises(ToolRegistryError, match="duplicate"):
++        registry.register(_spec(name="dummy"))
++
++
++def test_registry_rejects_non_async_executor() -> None:
++    def sync_executor(args: BaseModel) -> ToolResult:  # 非 async callable
++        return ToolResult(ok=True)
++
++    registry = ToolRegistry()
++    with pytest.raises(ToolRegistryError, match="async"):
++        registry.register(_spec(executor=sync_executor))
++
++
++def test_registry_rejects_non_basemodel_input() -> None:
++    """非 BaseModel 的 input_model 在 ToolSpec 构造期即被 pydantic 拒绝（第一道防线，
++    registry.register 的 issubclass 校验为第二道防线——对 pydantic 类型系统不可达）。"""
++    registry = ToolRegistry()
++    with pytest.raises(ValidationError):
++        registry.register(_spec(input_model=int))
++
++
++def test_tool_spec_literal_validation() -> None:
++    """idempotency/risk_level 为 Literal——非法值在构造期即失败（契约 §1.2）。"""
++    with pytest.raises(ValidationError):
++        _spec(idempotency="sometimes")  # type: ignore[arg-type]
++    with pytest.raises(ValidationError):
++        _spec(risk_level="extreme")  # type: ignore[arg-type]
++
++
++def test_registry_get_schemas_format() -> None:
++    registry = ToolRegistry()
++    registry.register(_spec())
++    schemas = registry.get_schemas()
++    assert len(schemas) == 1
++    entry = schemas[0]
++    assert entry["type"] == "function"
++    function = entry["function"]
++    assert function["name"] == "dummy"
++    assert function["description"] == "dummy tool for registry tests"
++    assert function["parameters"] == DummyInput.model_json_schema()

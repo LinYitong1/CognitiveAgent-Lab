@@ -20,3 +20,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# WorkBuddy 会话数据（项目记忆，不入库）
+.workbuddy/
