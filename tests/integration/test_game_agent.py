@@ -183,3 +183,60 @@ async def test_game_design_workflow_with_fix_path(sandbox: Path) -> None:
 
     # Bundle 不可变：两次 validate_game 之后逐字节一致
     assert bundle_file.read_bytes() == snapshot
+
+
+@pytest.mark.asyncio
+async def test_render_game_workflow_produces_playable_html(sandbox: Path) -> None:
+    """BR-11：export → validate_game(通过) → render_game → HTML 真实产生；
+    断言 HTML 以 <!DOCTYPE html> 开头、bundle 前后逐字节不变。"""
+    settings = _settings(sandbox)
+    registry = build_game_registry(settings)
+
+    # 阶段 1：export_experiment 写 bundle
+    fake_export = FakeLLM([
+        _tool_calls("fake-0", "export_experiment", {"config": GOOD_SPEC, "path": BUNDLE_REL}),
+        LLMResponse(content="Bundle exported.", finish_reason="stop"),
+    ])
+    loop1 = AgentLoop(client=fake_export, registry=registry, settings=settings, task_id="t-render-1")
+    result1 = await loop1.run_task("export the experiment bundle")
+    assert result1.status == "completed"
+    bundle_file = sandbox / BUNDLE_REL
+    snapshot = bundle_file.read_bytes()
+
+    # 阶段 2：validate_game（一次通过）→ render_game → final
+    html_rel = "games/generic-game.html"
+    fake_render = FakeLLM([
+        _tool_calls(
+            "fake-1", "validate_game",
+            {"game_config": _game_config(), "bundle_path": BUNDLE_REL, "previous_errors": []},
+        ),
+        _tool_calls(
+            "fake-2", "render_game",
+            {"game_config": _game_config(), "bundle_path": BUNDLE_REL,
+             "output_path": html_rel, "previous_errors": []},
+        ),
+        LLMResponse(content="Playable game rendered.", finish_reason="stop"),
+    ])
+    loop2 = AgentLoop(client=fake_render, registry=registry, settings=settings, task_id="t-render-2")
+    result2 = await loop2.run_task("design and render a playable game")
+
+    assert result2.status == "completed"
+    assert result2.result == "Playable game rendered."
+    assert _tool_call_names(result2) == ["validate_game", "render_game"]
+
+    # render_game 的 tool 报告：rendered:true + html_sha256
+    render_messages = fake_render.received_messages[2]
+    render_reports = [
+        str(m.get("content", "")) for m in render_messages if m.get("role") == "tool"
+    ]
+    assert '"rendered":true' in render_reports[-1]
+
+    # HTML 真实产生且形态正确
+    html_file = sandbox / html_rel
+    assert html_file.is_file()
+    html = html_file.read_text(encoding="utf-8")
+    assert html.startswith("<!DOCTYPE html>")
+    assert html.count("<script>") == 2
+
+    # Bundle 不可变：render 全流程之后逐字节一致
+    assert bundle_file.read_bytes() == snapshot

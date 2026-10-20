@@ -245,12 +245,13 @@ def test_bt5_toolspec_metadata() -> None:
 def test_bt5_registry_registers_validate_game() -> None:
     registry = build_game_registry(Settings(data_sandbox_dir="data/.test-sandbox/game-tool"))
     names = {s["function"]["name"] for s in registry.get_schemas()}
-    # M1 三工具 + 实验三工具 + validate_game = 7
-    assert names == {
+    # M1 三工具 + 实验三工具 + validate_game = 7（B1 冻结集；B2 追加 render_game 后为 8）
+    assert {
         "calc", "http_request", "file_write",
         "validate_experiment", "generate_trials", "export_experiment",
         "validate_game",
-    }
+    } <= names
+    assert "render_game" in names  # B2 契约 §11.8：组合器追加注册 render_game
 
 
 def test_bt5_description_reaches_tools_schema() -> None:

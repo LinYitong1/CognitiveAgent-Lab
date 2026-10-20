@@ -1,6 +1,6 @@
-# Phase B 契约 — GameSpec 与可玩 HTML 游戏生成（B0：GameSpec Schema 冻结版）
+# Phase B 契约 — GameSpec 与可玩 HTML 游戏生成（B0 Schema + B1 工具 + B2 渲染器：冻结版）
 
-> 作者：Architect Agent ｜ 状态：**草案（待用户审核）**——审核通过后 B0 实施代码；本文 B0 各节即 Backend 实现的唯一契约依据
+> 作者：Architect Agent ｜ 状态：**冻结**（B0/B1/B2 已获用户批准实施；§2~§9=B0，§10=B1，§11=B2）
 > 依据：`docs/plans/phaseB-plan.md`（用户已批准）、`docs/proposals/experiment-tools-design-proposal.md` v2.1 §4.0/§4.5/§7.2（裁剪+精化，差异见 §7）
 > 基线：commit `433419b`（Phase A 全绿 128/128 + PA-14 已知问题登记）
 > 硬边界：**不修改 M1 与 Phase A 已验收代码**（`game_schemas.py` 为纯新增文件；canonical_json 复用不改动）；不运行真实 LLM；不绑定任何范式/主题/模型；B1/B2/B3 不提前实施。
@@ -243,4 +243,123 @@ from the bundle file. bundle_path is the bundle file path inside data/ sandbox."
 - BT-5 FakeLLM description 进 tools schema；纯 ASCII；组合器注册 4 工具；
 - BT-6 全量回归（171+ 新增全绿）、pyright 0、分层 PASS。
 
-—— 契约草案即止。等待用户审核；批准后 B0 实施 `game_schemas.py` + `validate_game`（校验函数，非工具）+ GB 测试。
+## §11 B2：确定性 HTML 游戏渲染器与 render_game 工具（冻结）
+
+实现位置：`src/experiment/game_render.py`（渲染器，纯新增）+ `src/tools/game_tools.py`（追加 render_game 工具）+ `src/agent/game_registry.py`（追加注册）。M1 / Phase A / B0 / B1 既有行为零修改。
+
+### 11.1 前置与复用
+
+- 渲染入口 `render_game_html(bundle, game_spec) -> str` 为**纯函数**：不读时钟、无随机、无 I/O；
+- `render_game` 工具执行时**先调用 B0 `validate_game`**（规则零重复）：不通过 → `ok=True` + `valid:false` 报告（含 stalled），**不渲染、不写文件**；通过 → 渲染并写盘；
+- 试次/条件/刺激/正确答案**只**来自 `bundle`（D-2：渲染器是 trials 唯一消费者）；GameSpec 仅提供呈现参数。
+
+### 11.2 运行计划（run plan）
+
+`build_run_plan(bundle, game_spec) -> dict`（纯函数，pytest 可测的状态机与数据完整性载体）：
+
+```json
+{"meta": {"game_name","title","instructions","theme","layout",
+          "feedback":{"on_response","duration_ms"},
+          "flow":{"ready_screen","block_breaks","end_screen"},
+          "gamification":{"score","progress_bar","streak_bonus"},
+          "responses":[{"name","kind","options","scale","correct_from"}],   // 源自 bundle.spec.responses，顺序保留
+          "bindings":{"<response_name>":{"<物理键>":"<选项>"}},              // 源自 GameSpec（已过 G3~G6）
+          "total_trials","blocks":["practice","main"],
+          "integrity":{"bundle_sha256","trials_fingerprint","config_fingerprint"}},
+ "steps": [
+   {"type":"ready"},
+   {"type":"block_start"(隐式:引擎按 block 变化记录事件；无独立 step)},
+   {"type":"trial","index","block","display":[["factor","level"],...],"timing":{...},"correct":{"<response>":"<期望值>"}},
+   {"type":"block_break","completed_block","next_block","done_trials","total_trials"},
+   {"type":"end","summary":true|false}]}
+```
+
+- `display`：因素按 spec 声明序 + stimulus 键按字典序（确定性）；`correct` 仅含声明了 `correct_from` 的响应，值 = `trial.factors[correct_from]`（**来自 Bundle，非 GameSpec**）；
+- flow 开关裁剪 steps：`ready_screen=false` → 无 ready step；`block_breaks=false` → 无 block_break step；**end step 恒存在**（事件日志必须可导出），`summary` 标志控制统计区显示。
+
+### 11.3 HTML 形态与安全
+
+- 单文件 HTML，`file://` 直开；**零外部资源**（无 CDN/字体/网络请求）；内联 CSS + 两个 `<script>` 块；
+- script 块 1（数据+完整性，**无 DOM 引用**——可被 node 独立执行验证）：`PLAN`/`EXPECTED` 经 `JSON.parse("<JSON 文本>")` 载入，`TRIALS_CANONICAL`/`BUNDLE_CANONICAL` 为 canonical JSON 字符串字面量；
+- 嵌入转义：全部动态文本经 `json.dumps(ensure_ascii=True)` + `<` → `\u003c`（防 `</script>` 逃逸）；`<title>` 经 `html.escape`；
+- 模板组装用**模板 split + 内容交错**（禁止链式 replace——防用户文本含占位符注入）；
+- script 块 2（引擎）：**仅 textContent/createElement** 更新 DOM；禁止 `innerHTML`/`insertAdjacentHTML`/`document.write`/`eval`（测试 grep 断言）；theme/layout 为 Pydantic Literal 枚举 → 静态 body class。
+
+### 11.4 启动完整性校验（防线 D-3）
+
+- HTML 内嵌**纯 JS SHA-256 实现**（标准算法，无依赖）；
+- 启动时校验：`sha256(BUNDLE_CANONICAL) === bundle_sha256` 且 `sha256(TRIALS_CANONICAL) === trials_fingerprint`（BUNDLE_CANONICAL = canonical JSON(bundle 剥离 bundle_sha256/generated_at)，与 Phase A 计算口径逐字节一致）；
+- 任一失配 → 显示 integrity error 屏，**拒绝启动**；
+- Python 侧在渲染时重算两指纹与嵌入值比对（构建时防线）；node 探针执行 script 块 1 验证运行时判定（自动化 BR-8，node 缺失时 skip）。
+
+### 11.5 状态机执行语义（MVP）
+
+```
+READY(任意键) → 每试次: FIXATION(fixation_ms>0) → STIMULUS(display=因素水平行)
+  → 依 spec.responses 顺序逐响应采集 → FEEDBACK(on_response≠none 且 duration_ms>0) → ISI(isi_ms>0)
+块间(还有后续块): BLOCK_BREAK(任意键) → 全部完成 → END(统计+自检+事件日志导出)
+```
+
+- `choice`：绑定物理键（named: space/enter/left/right/up/down；单字母）；`text`/`rating`：输入框 + Enter（rating 校验整数 ∈ scale，否则提示重输）；
+- `stimulus_ms` 语义（MVP）：**每个响应的采集时限**（自该响应开始采集起算）；`null` = 无限等待；超时记 `value=null`；
+- 正确性：`value === step.correct[response]`（correct 缺失 → `null`=不适用；value=null → `false`）；得分/连击仅由该判定累计。
+
+### 11.6 事件日志（冻结格式）
+
+每事件含 `t_epoch_ms`（Date.now()，运行时数据不参与 HTML 确定性）；事件集：`game_start` / `block_start` / `trial_start`（含 conditions）/ `response` / `game_end`。`response` 事件字段：
+
+```json
+{"event":"response","trial_index":0,"block":"main","conditions":{"f":"v"},
+ "response_name":"judge","value":"a","correct":true,"rt_ms":812,"t_epoch_ms":...}
+```
+
+结束屏含**自检**（每试次响应事件数=声明响应数、响应名顺序一致、无未知 trial_index——运行时对账）；事件日志以只读 textarea 展示 + Blob 下载（`<game_name>-events.json`）。
+
+### 11.7 确定性
+
+- `render_game_html` 纯函数：同 Bundle + GameSpec → **逐字节相同** HTML；所有 dict 迭代来源为 list 序或排序键（hash-seed 无关）；
+- 黄金渲染文件 `tests/golden/game-generic-demo.html`：重渲染与提交文件字节相等（复制 PA-2 模式，QA 以外部 shasum + PYTHONHASHSEED 子进程交叉验证）。
+
+### 11.8 render_game 工具（ToolSpec）
+
+```
+name="render_game", idempotency="non-idempotent", risk_level="medium"   # 写盘，对齐 export_experiment
+Input: {game_config: dict, bundle_path: str, output_path: str, previous_errors: list[str]}
+description: 纯 ASCII（R2 教训），说明 GameSpec 结构同 validate_game + 前置校验 + output_path 语义
+```
+
+执行流程：① game_config 体积护栏（256KB，复用 B0）→ BLOCKED；② bundle 只读加载（沙箱 1~3 步）→ BLOCKED；③ `validate_game` 不通过 → `ok=True` + `{"rendered":false,"valid":false,...}`（不写文件）；④ 渲染 → HTML 字节 > `MAX_RENDERED_HTML_BYTES`(1MB) → BLOCKED；⑤ `validate_sandbox_path(output_path)` + `write_sandbox_file`（沙箱五步规则 1~3+5，第 4 步即 ④）→ BLOCKED；⑥ 成功 payload：
+
+```json
+{"rendered":true,"path":"games/x.html","html_sha256":"<64hex>","bytes":12345,"total_trials":48}
+```
+
+### 11.9 计时精度声明（诚实边界）
+
+HTML footer 与结束屏双处固定声明：浏览器原型计时为近似值（setTimeout 调度非毫秒精度），**不得用于正式数据收集**。产品文档同口径。
+
+### 11.10 B2 验收测试计划（pytest；FakeLLM 仅 BR-11 集成）
+
+| 编号 | 断言 |
+|------|------|
+| BR-1 | 渲染确定性：两次渲染逐字节相同；与提交黄金 HTML 文件逐字节相等 |
+| BR-2 | run plan 数据完整性（D-4 逻辑核）：trial steps 与 bundle.trials 一一对应（index/block/timing/display/correct 逐字段复制，顺序一致） |
+| BR-3 | 状态机裁剪：ready/block_breaks/end_screen 开关语义；block_break 仅出现在块间且字段正确；end step 恒存在 |
+| BR-4 | 表现层隔离：仅改 GameSpec 呈现字段（theme/feedback/title）→ trial steps 逐字节不变 |
+| BR-5 | 输出安全：恶意 `</script>`/`<img onerror>` 文本仅以转义形态出现；`</script>` 计数=模板固有数；引擎无 innerHTML/eval/document.write/insertAdjacentHTML |
+| BR-6 | render_game 工具：BLOCKED 五路（超大/路径逃逸 bundle/缺 bundle/坏 bundle/输出路径逃逸）；invalid spec → rendered:false 且零写盘；valid → 文件内容=渲染输出、html_sha256 与文件一致、bundle 前后逐字节不变 |
+| BR-7 | 嵌入锚点：TRIALS_CANONICAL 的 sha256 = trials_fingerprint 且 JSON 往返=bundle.trials；BUNDLE_CANONICAL 的 sha256 = bundle_sha256 |
+| BR-8 | 运行时完整性（node 可用则执行，缺失 skip）：执行 script 块 1 → integrity.ok=true；篡改输入 → 判定 false |
+| BR-9 | 组合器注册 5 工具；render_game description 进 tools schema 且纯 ASCII |
+| BR-10 | 通用性：新增源码 grep 无范式名（延续 GB-10 模式） |
+| BR-11 | FakeLLM 集成：export → validate_game(通过) → render_game → HTML 文件真实产生且以 `<!DOCTYPE html>` 开头、bundle 不变 |
+| BR-12 | 全量回归（185+新增）全绿；pyright 0 errors；分层 PASS |
+
+### 11.11 边界外（B2 不做）
+
+- pointer/touch、暂停/跳过/重试、动画素材、多语言、音频；
+- 浏览器自动化交互测试（Playwright 等——推迟到集成阶段，D2 决策不变）；
+- B3（README/开源整理/发布）；真实 LLM 调用。
+- 已知限制登记（如实）：浏览器 setTimeout 计时近似；事件日志依赖运行时（无强制落盘）；单响应串行采集（MVP）。
+
+
