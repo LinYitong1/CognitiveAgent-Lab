@@ -1,0 +1,30 @@
+[project]
+name = "cognitive-agent-lab"
+version = "0.1.0"
+description = "CognitiveAgent Lab — AI Agent runtime with task state persistence and observable event streams"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "pydantic-settings",
+    "httpx",
+    "openai",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "pyright",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.pyright]
+# 显式指定解释器环境，保证 `pyright src/` 解析到 .venv 的依赖
+venvPath = "."
+venv = ".venv"
