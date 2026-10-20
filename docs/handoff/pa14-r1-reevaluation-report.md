@@ -75,3 +75,21 @@
 - 本轮未启动 Phase B / M2 / M3 / GameSpec / 网页游戏 / MCP。
 
 —— 报告提交即止。等待用户对 PA-14 处置与 Phase A 关闭的裁定。
+
+---
+
+## 追加：R2 修复（F1）复验记录与最终处置（2026-10-20 晚）
+
+用户批准诊断修复 F1（description ASCII 化精简至 641 字符，契约 R2 修订，commit `c6ede05`；Architect→Backend→QA 全过：128/128 测试绿、QA 运行时探针确认 tools schema 纯 ASCII、确定性逐字节不变）。复验执行 2/3 次后按用户新指令（策略调整：停止 PA-14 反复修复）停止 Run 3。
+
+| 运行 | 结果 | 失败模式 | 关键证据 |
+|------|------|----------|----------|
+| Run 1 | 失败 | C（空响应、零工具调用） | 事件日志仅 2 条（running/final 空串） |
+| Run 2 | 失败 | **D（新：参数包装歧义）** | 模型**成功发起** `validate_experiment` 调用（R1 时 0/4 全空），且内联 spec **结构完全正确**（difficulty/modality、practice 8/main 96、balance、respond choice、correct_from=difficulty、seed 42、timing 500/null/1000 全对）；唯一错误：spec 直接作为 arguments 顶层、未包 `config` 键 → Pydantic "config Field required"；第二轮模型将工具调用文本作为 content 输出（泄漏为 final 文本） |
+
+**R2 的实质进展（如实记录）**：
+1. 工具调用发射恢复（失败模式 C→D）——F1 假设方向正确；
+2. spec 结构教学完全成功（失败模式 B 根除）——模型不再盲猜结构；
+3. 剩余问题收窄为单一措辞歧义："config must be the spec object itself, no wrapper" 被模型过度泛化为"arguments 就是 spec 本身"。潜在一行措辞修复方向（如 "pass {\"config\": <spec>}"）已在案，但按用户指令**不再修复**。
+
+**最终处置（用户裁定）**：PA-14 登记为**已知问题**（qwen2.5:7b + Ollama 0.40.6 栈）；Phase B 起以 FakeLLM + pytest 确定性测试为验收门槛；真实 LLM 端到端推迟到核心功能完成后的集成阶段（届时候选：措辞消歧一行修复 / OpenAI-compatible API 切换验证）。R2 代码保留（无回归，对更强模型通用有益）。
