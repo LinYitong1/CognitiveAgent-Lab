@@ -21,12 +21,38 @@ from __future__ import annotations
 
 import html
 import json
-from typing import cast
+from typing import Callable, cast
 
 from src.experiment.canonical import canonical_json
 from src.experiment.game_schemas import GameSpec
 
 MAX_RENDERED_HTML_BYTES = 1_048_576  # rendered-output guard (§11.8, same order as export)
+
+# ---------------------------------------------------------------------------
+# v2 layout registry (M2-D Phase 1): separately registered layout renderers.
+#
+# The classic pipeline below is NOT registry-based: it stays the default path for
+# every spec without a registered v2 layout (all v1 specs and v2 sequential specs),
+# byte-identical to the pre-M2-D behavior. A schema_version 2 GameSpec whose
+# mechanics.layout matches a registered renderer is dispatched to it instead.
+# ---------------------------------------------------------------------------
+
+_V2_LAYOUT_RENDERERS: dict[str, Callable[[dict[str, object], GameSpec], str]] = {}
+
+
+def register_v2_layout(
+    name: str, renderer: Callable[[dict[str, object], GameSpec], str]
+) -> None:
+    """Register a schema_version 2 layout renderer (M2-D; idempotent overwrite)."""
+    _V2_LAYOUT_RENDERERS[name] = renderer
+
+
+def _load_v2_layouts() -> None:
+    """Import the v2 layout module once and register its layout (lazy: the v1 import graph is unchanged)."""
+    if "explore-and-encounter" not in _V2_LAYOUT_RENDERERS:
+        from src.experiment import explore_render
+
+        explore_render.register_into(register_v2_layout)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +189,18 @@ def build_run_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[str, 
 # ---------------------------------------------------------------------------
 
 def render_game_html(bundle: dict[str, object], game_spec: GameSpec) -> str:
-    """Render the single-file playable HTML (pure function: same Bundle + GameSpec → byte-identical output)."""
+    """Render the single-file playable HTML (pure function: same Bundle + GameSpec → byte-identical output).
+
+    Dispatch (M2-D): a schema_version 2 GameSpec with a registered mechanics.layout renders
+    through that v2 layout renderer (currently: explore-and-encounter → explore_render);
+    every other spec — all v1 specs and v2 sequential specs — takes the classic pipeline
+    below, which is unchanged and byte-identical to the pre-M2-D behavior.
+    """
+    if game_spec.schema_version == 2 and game_spec.mechanics is not None:
+        _load_v2_layouts()
+        renderer = _V2_LAYOUT_RENDERERS.get(game_spec.mechanics.layout)
+        if renderer is not None:
+            return renderer(bundle, game_spec)
     plan = build_run_plan(bundle, game_spec)
     plan_text = _compact_json(plan)
 
