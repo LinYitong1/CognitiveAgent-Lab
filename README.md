@@ -49,7 +49,7 @@ ExperimentSpec (JSON, validated)
 
 ## Status: what is validated, what is not
 
-**Validated** (automated by the 225-test suite; deterministic; no LLM keys required):
+**Validated** (automated by the 231-test suite; deterministic; no LLM keys required):
 
 - The full ExperimentSpec → trials → ExperimentBundle pipeline: byte-reproducible
   for the same spec+seed, with dual SHA-256 fingerprints and an independent
@@ -70,7 +70,7 @@ ExperimentSpec (JSON, validated)
   workflow in the test suite runs against FakeLLM; a real LLM has been
   exercised only against the three basic M1 tools. The LLM interface
   (`LLMClientProtocol`) is swappable, and real-LLM integration is deferred.
-  In short: **the 225 tests prove the scaffold is reproducible; they do not
+  In short: **the 231 tests prove the scaffold is reproducible; they do not
   prove a real LLM can drive it.**
 
 ## Quick start (no LLM keys required)
@@ -104,9 +104,6 @@ cognitive-agent verify data/experiments/demo-agent-game.json
 | Console script | `cognitive-agent` (installed on PATH by `pip install`) |
 | Dependencies | FastAPI, Pydantic v2, pydantic-settings, httpx, openai SDK — nothing else (see pyproject.toml) |
 | Keys | Optional; `demo` and the whole test suite need zero keys |
-
-A [Codex Agent Skill](skills/cognitive-agent/SKILL.md) is included, so external
-agents can run the same deterministic workflows (install guidance in the skill file).
 
 ## Configuration
 
@@ -183,7 +180,7 @@ how the test suite drives the same loop deterministically with FakeLLM).
 You can also skip the agent entirely and call the engine directly —
 `build_bundle` / `validate_game` / `render_game_html` / `verify_bundle` are
 pure functions (see `examples/run_game_render.py` and the
-[Codex skill](skills/cognitive-agent/SKILL.md) for a complete worked example).
+[Codex skill](#codex-agent-skill) for a complete worked example).
 
 Other examples (repo clone only):
 
@@ -193,6 +190,40 @@ Other examples (repo clone only):
 .venv/bin/python examples/run_agent.py            # the three basic tools (requires a real LLM)
 .venv/bin/python examples/run_game_agent.py       # end-to-end demo (same flow as `cognitive-agent demo`)
 ```
+
+## Codex Agent Skill
+
+The repository ships a ready-made [Codex Agent Skill](skills/cognitive-agent/SKILL.md)
+that lets external coding agents (OpenAI Codex CLI and other SKILL.md-compatible
+tools) run the same deterministic workflows — experiment generation, validation,
+HTML rendering and bundle verification — **without invoking any LLM themselves**:
+the agent translates your request into tool calls; the deterministic Python
+engine does the actual work.
+
+Install (copy the skill directory into your agent's skills folder — directory
+structure must be preserved):
+
+```bash
+git clone --depth 1 https://github.com/LinYitong1/CognitiveAgent-Lab.git /tmp/cal
+mkdir -p ~/.codex/skills                       # user-level (all projects)
+cp -r /tmp/cal/skills/cognitive-agent ~/.codex/skills/
+rm -rf /tmp/cal
+# project-level instead: copy to <project>/.codex/skills/cognitive-agent/
+# then restart Codex so the skill list reloads
+```
+
+Usage — mention the skill explicitly (`$cognitive-agent ...`) or just describe
+the task and let the skill's description trigger it:
+
+```
+$cognitive-agent generate a red/blue colour-judgement experiment:
+practice 8 trials + main 40 trials, and render a playable HTML game
+```
+
+The skill instructs the agent to use the deterministic paths only
+(`cognitive-agent demo` / the Python API / `cognitive-agent verify`); the
+real-LLM path is explicitly fenced as opt-in. Requires the package installed
+(see [Installation](#installation)).
 
 ## Architecture
 
@@ -235,18 +266,25 @@ Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md)
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest            # full test suite (225 tests, no keys needed)
+.venv/bin/python -m pytest            # full test suite (231 tests, no keys needed)
 .venv/bin/python -m pyright src/      # static typing (0 errors)
 .venv/bin/python -m scripts.check_layers  # layering dependency check
 scripts/check.sh                      # CI gate (all of the above + secret scan + compile check)
 ```
 
-What the suite covers: deterministic generation (same spec+seed → identical
-fingerprints, byte-identical HTML, PYTHONHASHSEED-independent), schema
-boundaries, tool-security rules, golden files, and the FakeLLM-driven agent
-workflow. It is reproducibility evidence for the scaffold — read it alongside
+What the suite covers: deterministic generation, schema boundaries,
+tool-security rules, golden files, and the FakeLLM-driven agent workflow.
+It is reproducibility evidence for the scaffold — read it alongside
 the [status section](#status-what-is-validated-what-is-not), not as evidence
 of real-LLM capability.
+
+Determinism, precisely scoped: rerunning with the same spec+seed produces the
+**identical trial sequence, identical config/trials/bundle fingerprints, and
+byte-identical rendered HTML** (PYTHONHASHSEED-independent, cross-verified with
+the external `shasum` tool; golden files live in `tests/golden/`). The bundle
+**file bytes** are not byte-stable across exports — the JSON embeds a
+`generated_at` timestamp; strip that one field and separate exports compare
+byte-for-byte.
 
 ## Browser playtest checklist
 

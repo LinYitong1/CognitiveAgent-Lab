@@ -126,6 +126,11 @@ print(f"OK: {bundle_path} ({len(bundle['trials'])} trials), {html_path}")
 
 Key rules for building specs:
 
+- Determinism, precisely scoped: the same spec+seed yields the **identical
+  trial sequence, identical config/trials/bundle fingerprints, and
+  byte-identical rendered HTML**. The bundle JSON file itself embeds a
+  `generated_at` timestamp, so its raw bytes differ between exports — verify
+  bundles via `verify_bundle` (fingerprint-based), not raw-file comparison.
 - `experiment_ref` values must be copied **exactly** from the bundle —
   `validate_game` rejects any mismatch (anti-tamper design).
 - `correct_from` names a factor whose level equals the correct option

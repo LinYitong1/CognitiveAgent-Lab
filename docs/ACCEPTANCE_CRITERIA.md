@@ -8,8 +8,8 @@
 | ID | Criterion | Acceptance command | Pass condition |
 |----|------|----------|----------|
 | G-1 | all tests green | `bash scripts/check.sh` | check.sh **runs each check independently and prints per-check results** (aggregate exit code + per-check report); the verdict is **all checks pass** — a failure is attributable from the per-check report to a specific sub-gate; the aggregate exit code alone is not the verdict |
-| G-2 | coverage | `pytest --cov=src --cov-report=term-missing` | line coverage of agent/ tools/ storage/ ≥ 80% (**effective from M1** — in M0 those three modules do not exist yet, so only the command running without error is required; term-missing eases per-file review) |
-| G-3 | no hardcoded secrets | see the G-3 command block below | **a failure blocks**: grep exit code 1 (no match) → the block exits 0 = pass; exit code 0 (a match) or 2 (a scan error) → the block exits 1 = blocked. `|| echo CLEAN`-style fallbacks are forbidden |
+| G-2 | coverage | `pytest --cov=src --cov-report=term-missing --cov-fail-under=85` | total line coverage of `src/` ≥ 85% **enforced by the command itself** (`--cov-fail-under` exits non-zero below the threshold; measured total 89% as of 2026-10-21, keeping the acceptance floor of agent/ tools/ storage/ ≥ 80% from M1 satisfied with headroom; term-missing eases per-file review) |
+| G-3 | no hardcoded secrets | see the G-3 command block below | **a failure blocks**: git grep exit code 1 (no match) → the block exits 0 = pass; exit code 0 (a match) or 2 (a scan error) → the block exits 1 = blocked. `|| echo CLEAN`-style fallbacks are forbidden |
 | G-4 | layering dependencies correct | `python -m scripts.check_layers` (provided in M0; see the ROADMAP M0 deliverables) | **exit code 0 and no reverse-import output** (run from the project root) |
 | G-5a | static type check | `python -m pyright src/` | the exit code must be 0 (pyright is on the M0 dependency list; if the local Node.js runtime is missing so pyright cannot run, the dependency counts as unmet and the gate fails) |
 | G-5b | syntax compile check | `python -m compileall -q src/` | the exit code must be 0 |
@@ -19,12 +19,14 @@
 ### G-3 command block (the whole block's exit code is the verdict)
 
 ```bash
-grep -rniI -E "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
+git grep -nIiE "(^|[^a-z0-9_])sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+" \
+  -- src tests web examples skills scripts README.md .env.example pyproject.toml .github docs \
+  ':!docs/handoff' ':!docs/plans' ':!docs/proposals' ':!docs/research'
 rc=$?
 [ "$rc" -eq 1 ]
 ```
 
-> The regex contains `sk-[a-z0-9_-]{8,}` (covering the `sk-proj-…` / `sk-ant-…` prefix shapes). `-I` skips binary files — the scan targets source text; compiled `.pyc` artifacts can false-positive when marshal reference bytes land adjacent to ASCII strings (observed with pytest's assertion-rewrite bytecode). Semantics: grep rc=1 (no match) → pass; rc=0 (a match) or rc=2 (a scan error) → blocked. When integrating into check.sh, the exit code must be judged with an explicit `if`; a `set -e` chain cannot be relied on (grep rc=1 is the pass state and would abort a `set -e` script). Placeholder keys in test fixtures must use obviously non-real shapes (e.g. `test-key-not-real`) to avoid false positives from this scan.
+> The regex covers the `sk-proj-…` / `sk-ant-…` prefix shapes; the `(^|[^a-z0-9_])` prefix class prevents false positives on identifiers such as `task-creation` / `task-<hex>` (the letters `sk-` inside `task-`). `git grep` scans **git-tracked files only** — caches, build artifacts and untracked scratch files are out of scope; `-I` additionally skips binaries (compiled `.pyc` artifacts can false-positive when marshal reference bytes land adjacent to ASCII strings, observed with pytest's assertion-rewrite bytecode). Scope: maintained code and user-facing docs; the archival records under `docs/handoff|plans|proposals|research` are excluded because they may quote placeholder key shapes for historical accuracy. Semantics: git grep rc=1 (no match) → pass; rc=0 (a match) or 2 (a scan error) → blocked. When integrating into check.sh, the exit code must be judged with an explicit `if`; a `set -e` chain cannot be relied on (grep rc=1 is the pass state and would abort a `set -e` script — GitHub Actions' default `bash -e` hits exactly this). Placeholder keys in test fixtures must use obviously non-real shapes (e.g. `test-key-not-real`) to avoid false positives from this scan.
 
 ## M0 — Scaffolding
 

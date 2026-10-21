@@ -30,16 +30,24 @@ echo "===== G-1 all tests green (pytest) ====="
 if [ $? -eq 0 ]; then report pass "G-1 pytest all green"; else report fail "G-1 pytest all green"; fi
 
 echo
-echo "===== G-2 coverage (pytest --cov; M0 only requires the command to run) ====="
-"$PY" -m pytest --cov=src --cov-report=term-missing
-if [ $? -eq 0 ]; then report pass "G-2 coverage command runs"; else report fail "G-2 coverage command runs"; fi
+echo "===== G-2 coverage gate (pytest --cov; fails under 85%) ====="
+# Measured total: 89% (2026-10-21). Threshold 85% keeps ~4pt headroom above
+# the acceptance-criteria floor (agent/tools/storage >= 80%).
+"$PY" -m pytest --cov=src --cov-report=term-missing --cov-fail-under=85
+if [ $? -eq 0 ]; then report pass "G-2 coverage >= 85%"; else report fail "G-2 coverage >= 85%"; fi
 
 echo
-echo "===== G-3 secret scan (grep rc=1 passes; rc=0/2 blocks) ====="
-# -I skips binary files: compiled .pyc artifacts can false-positive when marshal
-# reference bytes land adjacent to ASCII strings (e.g. "task-expa002" + ref byte).
-# The scan targets source text only.
-grep -rniI -E "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/
+echo "===== G-3 secret scan (git grep rc=1 passes; rc=0/2 blocks) ====="
+# Scans git-tracked text files only (no caches or build artifacts; -I skips
+# binaries). Scope: maintained code and user-facing docs; the archival records
+# under docs/handoff|plans|proposals|research are excluded (they may quote
+# placeholder key shapes for historical accuracy).
+# The (^|[^a-z0-9_]) prefix class prevents false positives on identifiers such
+# as "task-creation" or "task-<hex>" (the letters sk- inside "task-") while
+# still matching real keys standing alone after quotes, spaces or punctuation.
+git grep -nIiE "(^|[^a-z0-9_])sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+" \
+  -- src tests web examples skills scripts README.md .env.example pyproject.toml .github docs \
+  ':!docs/handoff' ':!docs/plans' ':!docs/proposals' ':!docs/research'
 g3_rc=$?
 if [ "$g3_rc" -eq 1 ]; then
   report pass "G-3 no hardcoded secrets"

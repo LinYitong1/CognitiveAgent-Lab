@@ -31,24 +31,29 @@ jobs:
           CALC_AGENT_ENV_FILE: /dev/null
         run: .venv/bin/python -m pytest
 
-      - name: G-2 Coverage command runs
+      - name: G-2 Coverage gate (fails under 85%)
         env:
           CALC_AGENT_ENV_FILE: /dev/null
-        run: .venv/bin/python -m pytest --cov=src --cov-report=term-missing
+        run: .venv/bin/python -m pytest --cov=src --cov-report=term-missing --cov-fail-under=85
 
-      - name: G-3 Secret scan (grep rc=1 passes)
+      - name: G-3 Secret scan (git grep rc=1 passes)
         run: |
-          # -I skips binary files (compiled .pyc artifacts can false-positive
-          # when marshal reference bytes land adjacent to ASCII strings).
+          # Scans git-tracked text files only (-I skips binaries). Scope: code
+          # and maintained user-facing docs; archival docs under
+          # docs/handoff|plans|proposals|research are excluded. The
+          # (^|[^a-z0-9_]) prefix class prevents false positives on identifiers
+          # like "task-creation" / "task-<hex>" (letters sk- inside "task-").
           # GitHub Actions runs this with `bash -e`, and grep's PASS state is
           # exit 1 — so the exit code must be captured with `|| rc=$?` rather
           # than read after the command (the -e shell aborts otherwise).
           rc=0
-          grep -rniI -E "(sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+)" src/ tests/ web/ || rc=$?
+          git grep -nIiE "(^|[^a-z0-9_])sk-[a-z0-9_-]{8,}|api[_-]?key[[:space:]]*=[[:space:]]*[\"'][^\"']+" \
+            -- src tests web examples skills scripts README.md .env.example pyproject.toml .github docs \
+            ':!docs/handoff' ':!docs/plans' ':!docs/proposals' ':!docs/research' || rc=$?
           if [ "$rc" -eq 1 ]; then
             echo "G-3 PASS: no hardcoded secrets"
           else
-            echo "G-3 FAIL: suspected hardcoded secrets (grep rc=${rc})"
+            echo "G-3 FAIL: suspected hardcoded secrets (git grep rc=${rc})"
             exit 1
           fi
 
