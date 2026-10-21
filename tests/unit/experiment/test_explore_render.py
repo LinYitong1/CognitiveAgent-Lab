@@ -77,6 +77,76 @@ def test_plan_world_rooms_reachable() -> None:
     assert len(rooms) >= 2  # the vertical slice requires connected rooms
 
 
+def test_plan_layout_slots_follow_declaration_order() -> None:
+    """Stage 2a: layout slots are a pure function of declaration order — positions
+    never depend on object content, labels, or any experimental factor."""
+    bundle, game_spec = _validated_manor_spec()
+    plan = build_explore_plan(bundle, game_spec)
+    world = cast(dict[str, object], plan["world"])
+    rooms = cast(dict[str, object], world["rooms"])
+    for room in cast(dict[str, object], rooms).values():
+        r = cast(dict[str, object], room)
+        layout = cast(dict[str, object], r["layout"])
+        obj_slots = cast(list[object], layout["objects"])
+        objects = cast(list[object], r["objects"])
+        assert [cast(dict[str, object], s)["object_id"] for s in obj_slots] == [
+            cast(dict[str, object], o)["object_id"] for o in objects
+        ]
+        # deterministic slot coordinates, strictly increasing pairs (fixed table)
+        coords = [(cast(dict[str, object], s)["x"], cast(dict[str, object], s)["y"]) for s in obj_slots]
+        assert coords == sorted(coords) or all(
+            coords[i][1] <= coords[i + 1][1] for i in range(len(coords) - 1)
+        )
+        assert len(obj_slots) <= 6 and len(cast(list[object], layout["exits"])) <= 4
+        # exits carry their declaration-order target + label
+        exit_slots = cast(list[object], layout["exits"])
+        exits = cast(dict[str, str], r["exits"])
+        assert [cast(dict[str, object], e)["target"] for e in exit_slots] == list(exits.keys())
+        for e in exit_slots:
+            entry = cast(dict[str, object], e)
+            assert entry["label"] == exits[cast(str, entry["target"])]
+
+
+def test_plan_layout_rejects_oversized_rooms() -> None:
+    """The layout builder refuses rooms beyond the slot-table bounds (defense in depth
+    behind the schema bound — pydantic rejects >6 objects/>4 exits first)."""
+    from types import SimpleNamespace
+
+    from src.experiment.explore_render import _room_layout
+
+    def obj(i: int) -> SimpleNamespace:
+        return SimpleNamespace(object_id=f"o{i}", label=f"o{i}", inspect_text="x",
+                               role="flavour")
+
+    big = SimpleNamespace(objects=[obj(i) for i in range(7)], exits={"b": "door"})
+    with pytest.raises(ValueError, match="supports at most"):
+        _room_layout(big)
+
+    many_exits = SimpleNamespace(objects=[obj(0)], exits={c: "d" for c in "abcdx"})
+    with pytest.raises(ValueError, match="supports at most"):
+        _room_layout(many_exits)
+
+
+def test_render_source_has_no_condition_dependent_styling() -> None:
+    """Stage 2a constraint: no condition-dependent visual styling may exist in the
+    shared renderer — no factor/condition/theme vocabulary wired to presentation."""
+    source = (PROJECT_ROOT / "src" / "experiment" / "explore_render.py").read_text(
+        encoding="utf-8"
+    ).lower()
+    for banned in ("condition_theme", "salience", "factor_level"):
+        assert banned not in source, (
+            f"condition-dependent styling token {banned!r} present in explore_render.py"
+        )
+    # the plan's world section must not reference any factor or condition names
+    bundle, game_spec = _validated_manor_spec()
+    plan = build_explore_plan(bundle, game_spec)
+    world_text = json.dumps(plan["world"], sort_keys=True)
+    spec = cast(dict[str, object], bundle["spec"])
+    for factor in cast(list[object], spec["factors"]):
+        fname = cast(str, cast(dict[str, object], factor)["name"])
+        assert fname not in world_text, f"factor {fname!r} leaked into the world layout"
+
+
 def test_plan_encounters_match_mapping() -> None:
     """The plan carries the mapping's encounter list verbatim (order, membership)."""
     bundle, gamespec = _load_manor()

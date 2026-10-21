@@ -51,6 +51,51 @@ from src.experiment.game_schemas import GameSpec
 LAYOUT_NAME = "explore-and-encounter"
 
 # ---------------------------------------------------------------------------
+# Deterministic SVG slot geometry (Stage 2a): pure function of declaration order.
+#
+# Shared rendering logic only — no content, no condition-dependent styling.
+# Objects: two rows of three (schema bound: MAX_OBJECTS_PER_ROOM = 6);
+# exits: up to four edge positions in declaration order (MAX_EXITS_PER_ROOM = 4).
+# ---------------------------------------------------------------------------
+
+_VIEWBOX_W = 640
+_VIEWBOX_H = 410
+
+_OBJECT_SLOTS: tuple[tuple[int, int], ...] = (
+    (160, 150), (320, 150), (480, 150),
+    (160, 290), (320, 290), (480, 290),
+)
+_EXIT_SLOTS: tuple[tuple[int, int], ...] = (
+    (320, 34),   # top edge
+    (576, 200),  # right edge
+    (320, 378),  # bottom edge
+    (56, 200),   # left edge
+)
+
+
+def _room_layout(room) -> dict[str, list[dict[str, object]]]:
+    """Declaration-order slot assignment (pure; positions never depend on content)."""
+    if len(room.objects) > len(_OBJECT_SLOTS):
+        raise ValueError(
+            f"room has {len(room.objects)} objects; the layout supports at most "
+            f"{len(_OBJECT_SLOTS)} (G8 should have rejected this)"
+        )
+    if len(room.exits) > len(_EXIT_SLOTS):
+        raise ValueError(
+            f"room has {len(room.exits)} exits; the layout supports at most "
+            f"{len(_EXIT_SLOTS)} (G8 should have rejected this)"
+        )
+    objects = [
+        {"object_id": o.object_id, "x": x, "y": y}
+        for o, (x, y) in zip(room.objects, _OBJECT_SLOTS)
+    ]
+    exits = [
+        {"target": target, "label": label, "x": x, "y": y}
+        for target, label, (x, y) in zip(room.exits.keys(), room.exits.values(), _EXIT_SLOTS)
+    ]
+    return {"objects": objects, "exits": exits}
+
+# ---------------------------------------------------------------------------
 # Explore plan (pure function; the testable carrier of the explore state machine)
 # ---------------------------------------------------------------------------
 
@@ -108,7 +153,8 @@ def build_explore_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[s
                 f"response {name!r} has no key binding on the mapping or input surface"
             )
 
-    # world projection (plain dicts; G8 already validated structure/reachability)
+    # world projection (plain dicts; G8 already validated structure/reachability);
+    # layout = deterministic declaration-order SVG slots (Stage 2a)
     rooms: dict[str, dict[str, object]] = {}
     for room_id, room in world.rooms.items():
         rooms[room_id] = {
@@ -124,6 +170,7 @@ def build_explore_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[s
                 }
                 for o in room.objects
             ],
+            "layout": _room_layout(room),
         }
     for room_id, room in rooms.items():
         for target in cast(dict[str, str], room["exits"]):
@@ -295,13 +342,15 @@ _ENGINE_JS = """\
     room: WORLD.start_room,
     cursor: 0,           // monotonic trial cursor — the ONLY trial-selection mechanism
     examined: {},        // object_id -> true (an encounter object fires at most one trial)
+    inspected: {},       // object_id -> true (flavour objects seen; visual state only)
     lastBlock: null,
     doneTrials: 0,
     score: 0, streak: 0, bestStreak: 0, correctCount: 0, correctApplicable: 0
   };
   function snapshot() {
     return { mode: state.mode, phase: state.phase, room: state.room, cursor: state.cursor,
-             done_trials: state.doneTrials, total_trials: M.total_trials };
+             done_trials: state.doneTrials, total_trials: M.total_trials,
+             examined_count: Object.keys(state.examined).length };
   }
 
   // ---------- DOM helpers: textContent only (security contract) ----------
@@ -312,6 +361,19 @@ _ENGINE_JS = """\
     if (text !== undefined && text !== null) { d.textContent = String(text); }
     parent.appendChild(d);
     return d;
+  }
+
+  // ---------- SVG helpers (Stage 2a): createElementNS + attributes; text via textContent only ----------
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function svgEl(tag, attrs, text) {
+    var e = document.createElementNS(SVG_NS, tag);
+    if (attrs) {
+      for (var k in attrs) {
+        if (Object.prototype.hasOwnProperty.call(attrs, k)) { e.setAttribute(k, attrs[k]); }
+      }
+    }
+    if (text !== undefined && text !== null) { e.textContent = String(text); }
+    return e;
   }
 
   // ---------- keyboard (same waitKey protocol as the classic engine) ----------
@@ -338,12 +400,44 @@ _ENGINE_JS = """\
       pendingKey = entry;
     });
   }
+  // ---------- unified input routing (Stage 2a): clicks and keys hit the SAME action path ----------
+  // explore mode resolves through the action waiter; inspect mode dismisses the inline
+  // panel; every other mode (intro/briefing/encounter) uses the classic waitKey below.
+  var exploreResolve = null;     // current explore-loop waiter (resolved with an action)
+  var currentActions = {};       // key -> action map for the rendered room
+  var dismissResolve = null;     // inline inspect-panel dismiss waiter
+
+  function submitAction(action) {
+    if (state.mode !== "explore" || !exploreResolve) { return; }
+    var r = exploreResolve;
+    exploreResolve = null;
+    r(action);
+  }
+
+  function dismissInspect() {
+    if (state.mode !== "inspect" || !dismissResolve) { return; }
+    var d = dismissResolve;
+    dismissResolve = null;
+    d();
+  }
+
   document.addEventListener("keydown", function (ev) {
     var el = document.activeElement;
     if (el && el.tagName === "INPUT") { return; }
-    if (!pendingKey) { return; }
     var k = physKey(ev);
     if (k === null) { return; }
+    if (state.mode === "explore" && exploreResolve) {
+      var act = Object.prototype.hasOwnProperty.call(currentActions, k)
+        ? currentActions[k] : null;
+      if (act) { ev.preventDefault(); submitAction(act); }
+      return;
+    }
+    if (state.mode === "inspect" && dismissResolve) {
+      ev.preventDefault();
+      dismissInspect();
+      return;
+    }
+    if (!pendingKey) { return; }
     if (pendingKey.filter && !pendingKey.filter(k)) { return; }
     ev.preventDefault();
     var entry = pendingKey;
@@ -389,7 +483,7 @@ _ENGINE_JS = """\
     addDiv(screenEl, "hint", "bundle ok: " + integrity.bundle_ok + " / trials ok: " + integrity.trials_ok);
   }
 
-  // ---------- exploration ----------
+  // ---------- exploration (Stage 2a: SVG room view; click ≡ keyboard) ----------
   function keyForIndex(i) { return i < 9 ? String(i + 1) : "0"; }
 
   function visibleObjects(room) {
@@ -402,92 +496,164 @@ _ENGINE_JS = """\
     return out;
   }
 
+  function slotForObject(room, objectId) {
+    var slots = room.layout.objects;
+    for (var i = 0; i < slots.length; i++) {
+      if (slots[i].object_id === objectId) { return slots[i]; }
+    }
+    return null;
+  }
+
+  function isExamined(o) {
+    if (o.role === "encounter") { return !!state.examined[o.object_id]; }
+    return !!state.inspected[o.object_id];
+  }
+
   function renderRoom() {
     state.mode = "explore";
     state.phase = null;
     stageEl.classList.remove("mode-experiment");
     clearEl(screenEl);
+    currentActions = {};
     var room = WORLD.rooms[state.room];
     addDiv(screenEl, "room-title", room.title);
     if (room.description) { addDiv(screenEl, "room-desc", room.description); }
-    var objects = visibleObjects(room);
-    if (objects.length > 0) {
-      addDiv(screenEl, "room-section", "You notice:");
-      for (var i = 0; i < objects.length; i++) {
-        var o = objects[i];
-        var suffix = "";
-        if (o.role === "encounter" && state.examined[o.object_id]) { suffix = " (examined)"; }
-        addDiv(screenEl, "room-item", "[" + keyForIndex(i) + "] " + o.label + suffix);
-      }
-    }
-    var exitIds = Object.keys(room.exits);
-    if (exitIds.length > 0) {
-      addDiv(screenEl, "room-section", "Ways on:");
-      for (var e = 0; e < exitIds.length; e++) {
-        addDiv(screenEl, "room-item", "[" + keyForIndex(objects.length + e) + "] " + room.exits[exitIds[e]]);
-      }
-    }
-    if (state.cursor >= M.total_trials) {
-      addDiv(screenEl, "room-conclude", "[x] conclude the session");
-    }
-    addDiv(screenEl, "hint", "Numbers inspect objects or move between rooms; encounters run a controlled trial.");
-  }
 
-  function roomActions() {
-    var room = WORLD.rooms[state.room];
-    var actions = {};
+    // deterministic SVG floor panel (viewBox scales responsively; slots from the plan)
+    var svg = svgEl("svg", { viewBox: "0 0 640 410", class: "room-svg",
+                             role: "img", "aria-label": room.title });
+    svg.appendChild(svgEl("rect",
+      { x: 8, y: 8, width: 624, height: 394, rx: 14, class: "room-floor" }));
+    screenEl.appendChild(svg);
+
+    // objects: clickable nodes at their layout slots (declaration order)
     var objects = visibleObjects(room);
     for (var i = 0; i < objects.length; i++) {
-      actions[keyForIndex(i)] = { kind: "object", obj: objects[i] };
+      var o = objects[i];
+      var slot = slotForObject(room, o.object_id);
+      var key = keyForIndex(i);
+      var nodeClass = "obj-node " + (o.role === "encounter" ? "role-encounter" : "role-flavour")
+        + (isExamined(o) ? " examined" : "");
+      var g = svgEl("g", { id: "obj-" + o.object_id, class: nodeClass });
+      if (o.role === "encounter") {
+        g.appendChild(svgEl("rect", { x: slot.x - 27, y: slot.y - 27, width: 54, height: 54,
+                                      rx: 10, class: "obj-shape" }));
+      } else {
+        g.appendChild(svgEl("circle", { cx: slot.x, cy: slot.y, r: 27, class: "obj-shape" }));
+      }
+      g.appendChild(svgEl("circle", { cx: slot.x - 30, cy: slot.y - 30, r: 11, class: "key-badge" }));
+      g.appendChild(svgEl("text", { x: slot.x - 30, y: slot.y - 25, class: "key-text",
+                                    "text-anchor": "middle" }, key));
+      g.appendChild(svgEl("text", { x: slot.x, y: slot.y + 50, class: "obj-label",
+                                    "text-anchor": "middle" }, o.label));
+      if (isExamined(o) && o.role === "encounter") {
+        g.appendChild(svgEl("text", { x: slot.x + 30, y: slot.y - 24, class: "examined-mark",
+                                      "text-anchor": "middle" }, "\\u2713"));
+      }
+      var act = { kind: "object", obj: o };
+      g.addEventListener("click", (function (a) {
+        return function () { submitAction(a); };
+      })(act));
+      svg.appendChild(g);
+      currentActions[key] = act;
     }
-    var exitIds = Object.keys(room.exits);
-    for (var e = 0; e < exitIds.length; e++) {
-      actions[keyForIndex(objects.length + e)] = { kind: "exit", target: exitIds[e] };
+
+    // exits: clickable doorway nodes at the edge slots (declaration order);
+    // door width adapts to the label length (deterministic function of the text;
+    // edge-aware caps keep doors inside the viewBox) — audit fix for label overflow
+    var exits = room.layout.exits;
+    for (var e = 0; e < exits.length; e++) {
+      var ex = exits[e];
+      var ekey = keyForIndex(objects.length + e);
+      var side = ex.x < 100 || ex.x > 500;   // left/right edge slots have less room
+      var cap = side ? 128 : 220;
+      var w = Math.max(104, Math.min(cap, Math.ceil(7 * ex.label.length) + 20));
+      var door = svgEl("g", { id: "exit-" + ex.target, class: "exit-node" });
+      door.appendChild(svgEl("rect", { x: ex.x - w / 2, y: ex.y - 20, width: w, height: 40,
+                                       rx: 8, class: "exit-shape" }));
+      door.appendChild(svgEl("text", { x: ex.x, y: ex.y + 4, class: "exit-label",
+                                       "text-anchor": "middle" }, ex.label));
+      door.appendChild(svgEl("circle", { cx: ex.x - w / 2, cy: ex.y - 20, r: 11, class: "key-badge" }));
+      door.appendChild(svgEl("text", { x: ex.x - w / 2, y: ex.y - 15, class: "key-text",
+                                       "text-anchor": "middle" }, ekey));
+      var eact = { kind: "exit", target: ex.target };
+      door.addEventListener("click", (function (a) {
+        return function () { submitAction(a); };
+      })(eact));
+      svg.appendChild(door);
+      currentActions[ekey] = eact;
     }
-    if (state.cursor >= M.total_trials) { actions["x"] = { kind: "conclude" }; }
-    return actions;
+
+    // conclusion: only after every trial is consumed
+    if (state.cursor >= M.total_trials) {
+      var cbtn = document.createElement("button");
+      cbtn.id = "conclude-btn";
+      cbtn.className = "conclude-btn";
+      cbtn.type = "button";
+      cbtn.textContent = "conclude the session [x]";
+      cbtn.addEventListener("click", function () { submitAction({ kind: "conclude" }); });
+      screenEl.appendChild(cbtn);
+      currentActions["x"] = { kind: "conclude" };
+    }
+    addDiv(screenEl, "hint",
+      "Click objects and doorways (or press their number keys). A marked item starts a controlled trial.");
+  }
+
+  function runAction(act) {
+    if (act.kind === "exit") {
+      state.room = act.target;
+      logGame({ event: "room_enter", room: act.target });
+      return Promise.resolve();
+    }
+    if (act.kind === "conclude") { endGame(); return Promise.resolve(); }
+    var obj = act.obj;
+    var canFire = obj.role === "encounter" && !state.examined[obj.object_id]
+      && state.cursor < M.total_trials;
+    if (canFire) {
+      state.examined[obj.object_id] = true;
+      logGame({ event: "encounter_trigger", object_id: obj.object_id, trial_index: state.cursor });
+      return runEncounter(obj);
+    }
+    var note = null;
+    if (obj.role === "encounter" && !state.examined[obj.object_id]
+        && state.cursor >= M.total_trials) {
+      note = "All trials are complete; nothing further is recorded here.";
+    }
+    state.inspected[obj.object_id] = true;
+    logGame({ event: "object_inspect", object_id: obj.object_id, role: obj.role });
+    return showInspect(obj, note);
   }
 
   function exploreLoop() {
     renderRoom();
     updateHeader();
-    var actions = roomActions();
-    return waitKey(function (k) {
-      return Object.prototype.hasOwnProperty.call(actions, k);
-    }, null).then(function (k) {
-      var act = actions[k];
-      if (act.kind === "exit") {
-        state.room = act.target;
-        logGame({ event: "room_enter", room: act.target });
+    return new Promise(function (resolve) { exploreResolve = resolve; })
+      .then(runAction)
+      .then(function () {
+        if (state.mode === "end") { return null; }
         return exploreLoop();
-      }
-      if (act.kind === "conclude") { return endGame(); }
-      var obj = act.obj;
-      var canFire = obj.role === "encounter" && !state.examined[obj.object_id]
-        && state.cursor < M.total_trials;
-      if (canFire) {
-        state.examined[obj.object_id] = true;
-        logGame({ event: "encounter_trigger", object_id: obj.object_id, trial_index: state.cursor });
-        return runEncounter(obj).then(function () { return exploreLoop(); });
-      }
-      var note = null;
-      if (obj.role === "encounter" && !state.examined[obj.object_id]
-          && state.cursor >= M.total_trials) {
-        note = "All trials are complete; nothing further is recorded here.";
-      }
-      logGame({ event: "object_inspect", object_id: obj.object_id, role: obj.role });
-      return showInspect(obj, note).then(function () { return exploreLoop(); });
-    });
+      });
   }
 
   function showInspect(obj, note) {
+    // Stage 2a: an INLINE panel below the room view — the room stays visible,
+    // spatial context is preserved; closing returns to the same room state.
     state.mode = "inspect";
-    clearEl(screenEl);
-    addDiv(screenEl, "title", obj.label);
-    addDiv(screenEl, "inspect-text", obj.inspect_text);
-    if (note) { addDiv(screenEl, "hint", note); }
-    addDiv(screenEl, "hint", "Press any key to continue");
-    return waitKey(null, null);
+    var panel = addDiv(screenEl, "inspect-panel");
+    panel.id = "inspect-panel";
+    addDiv(panel, "inspect-title", obj.label);
+    addDiv(panel, "inspect-text", obj.inspect_text);
+    if (note) { addDiv(panel, "hint", note); }
+    var btn = document.createElement("button");
+    btn.id = "inspect-close";
+    btn.className = "inspect-close";
+    btn.type = "button";
+    btn.textContent = "close";
+    btn.addEventListener("click", function () { dismissInspect(); });
+    panel.appendChild(btn);
+    return new Promise(function (resolve) {
+      dismissResolve = resolve;
+    });
   }
 
   function showBriefing(block) {
@@ -769,10 +935,32 @@ body.theme-dark #stage.mode-experiment { background:rgba(91,141,239,0.10); }
 #screen { width:100%; }
 .room-title { font-size:1.35rem; font-weight:700; margin-bottom:0.3rem; }
 .room-desc { color:var(--muted); margin-bottom:0.8rem; }
-.room-section { font-size:0.75rem; text-transform:uppercase; letter-spacing:0.09em;
-  color:var(--muted); margin-top:0.9rem; }
-.room-item { margin:0.25rem 0; font-size:1.05rem; }
-.room-conclude { margin-top:1.1rem; font-weight:600; color:var(--accent); }
+.room-svg { display:block; width:100%; max-width:640px; height:auto; margin:0 auto; }
+.room-floor { fill:rgba(91,141,239,0.05); stroke:#c9ccd4; stroke-width:2; }
+body.theme-dark .room-floor { fill:rgba(91,141,239,0.07); stroke:#3a3a40; }
+.obj-node { cursor:pointer; }
+.obj-shape { fill:#ffffff; stroke:var(--accent); stroke-width:3; }
+body.theme-dark .obj-shape { fill:#2a2a30; }
+.role-flavour .obj-shape { stroke:#9aa2ad; }
+.obj-node:hover .obj-shape { stroke-width:5; }
+.obj-node.examined .obj-shape { stroke:#c4c8cf; fill:#f0f0ee; }
+body.theme-dark .obj-node.examined .obj-shape { stroke:#4a4a52; fill:#232328; }
+.examined-mark { font-size:16px; font-weight:700; fill:var(--ok); }
+.obj-label { font-size:13px; fill:var(--fg); pointer-events:none; }
+.exit-node { cursor:pointer; }
+.exit-shape { fill:rgba(91,141,239,0.14); stroke:var(--accent); stroke-width:2; }
+body.theme-dark .exit-shape { fill:rgba(91,141,239,0.18); }
+.exit-node:hover .exit-shape { stroke-width:4; }
+.exit-label { font-size:11px; fill:var(--fg); pointer-events:none; }
+.key-badge { fill:var(--fg); opacity:0.8; pointer-events:none; }
+.key-text { font-size:12px; font-weight:700; fill:#ffffff; pointer-events:none; }
+.inspect-panel { margin:12px auto 4px; max-width:560px; border:2px solid #c9ccd4;
+  border-radius:10px; padding:12px 16px; background:rgba(91,141,239,0.05); }
+body.theme-dark .inspect-panel { border-color:#3a3a40; background:rgba(91,141,239,0.08); }
+.inspect-title { font-weight:700; font-size:1.05rem; margin-bottom:0.3rem; }
+.inspect-text { font-size:1.05rem; font-style:italic; margin:0.4rem 0; }
+.inspect-close { display:block; }
+.conclude-btn { display:block; margin:12px auto 4px; font-weight:600; }
 .inspect-text { font-size:1.15rem; margin:0.6rem 0; font-style:italic; }
 .trial-banner { font-size:0.72rem; text-transform:uppercase; letter-spacing:0.13em;
   color:var(--accent); margin-bottom:0.9rem; font-weight:700; }
