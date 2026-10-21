@@ -1,7 +1,8 @@
 """ExperimentBundle assembly (contract §6.2/§6.3, frozen).
 
-- The bundle is self-contained: normalized spec (model_dump after Pydantic parse, defaults filled)
-  + full trials + reproducibility (incl. effective_weights / allocation per-block) + summary;
+- The bundle is self-contained: normalized spec (spec_dump after Pydantic parse — defaults filled,
+  UNSET v2 fields removed, M2-B D-M2-1 §1.1) + full trials + reproducibility (incl. effective_weights /
+  allocation per-block) + summary;
 - bundle_sha256 = SHA-256(canonical JSON(bundle with the "bundle_sha256" and "generated_at" keys stripped));
   generated_at participates in no fingerprint (a timestamp is not a deterministic input);
 - allocation records only combinations actually allocated a non-zero count (filtered combos are absent);
@@ -22,7 +23,7 @@ from src.experiment.generation import (
     generate_trials,
     mutex_pairs,
 )
-from src.experiment.schemas import ExperimentSpec
+from src.experiment.schemas import ExperimentSpec, spec_dump
 
 
 def _now_utc_iso_z() -> str:
@@ -55,7 +56,7 @@ def build_bundle(spec: ExperimentSpec, *, generated_at: str | None = None) -> di
     bundle: dict[str, object] = {
         "schema_version": 1,
         "generated_at": generated_at if generated_at is not None else _now_utc_iso_z(),
-        "spec": spec.model_dump(),
+        "spec": spec_dump(spec),
         "reproducibility": {
             "engine_spec_version": ENGINE_SPEC_VERSION,
             "config_fingerprint": generated.config_fingerprint,

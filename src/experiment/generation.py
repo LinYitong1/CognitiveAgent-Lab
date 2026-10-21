@@ -1,7 +1,12 @@
 """Deterministic generation engine (contract §3 nine-step algorithm, frozen).
 
 Trial generation = a pure function: no IO, no time dependency, no hidden state, no global randomness.
-The only randomness consumer: the within-block shuffle (exactly one rng.shuffle call per block).
+The only randomness consumers: the within-block shuffle (exactly one rng.shuffle call per block) and,
+for v2 specs only (M2-B), the per-trial stimulus materialization streams (digest-derived,
+src/experiment/stimulus.py) — both PYTHONHASHSEED-independent. v1-shaped specs execute the exact
+v1 code path (byte-identical outputs); ENGINE_SPEC_VERSION therefore stays "1.0" — the bump rule
+applies to changes in the v1 path. v2 materialization presence is fully determined by the spec
+content itself (schema_version 2 + set v2 fields), so any bundle is unambiguously attributable.
 Seed derivation (CR-1): the first 8 bytes of SHA-256(f"{seed}:block:{block.name}") as a big-endian int64.
 
 Determinism guarantees (§3.4): no set construction/iteration; dicts rely on ≥3.7 insertion order;
@@ -20,7 +25,9 @@ from src.experiment.schemas import (
     ExperimentSpec,
     GeneratedExperiment,
     Trial,
+    spec_dump,
 )
+from src.experiment.stimulus import materialize_trials
 
 ENGINE_SPEC_VERSION: str = "1.0"  # must be bumped on any algorithm change (allocation/derivation/shuffle/serialization)
 
@@ -222,7 +229,13 @@ def generate_trials(spec: ExperimentSpec, max_attempts: int = 100) -> GeneratedE
                 )
             )
 
-    config_fingerprint = sha256_hex(canonical_json(spec.model_dump()))
+    # M2-B: v2 materialization (stimulus content + derived values) BEFORE
+    # fingerprint computation — materialized data is fully covered by
+    # trials_fingerprint. No-op for v1-shaped specs (byte-identical to v1).
+    if spec.stimulus_spec is not None or spec.derived_spec is not None:
+        materialize_trials(spec, trials)
+
+    config_fingerprint = sha256_hex(canonical_json(spec_dump(spec)))
     trials_fingerprint = sha256_hex(canonical_json([trial.model_dump() for trial in trials]))
     return GeneratedExperiment(
         config_fingerprint=config_fingerprint,

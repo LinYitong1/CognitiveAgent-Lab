@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from src.experiment.canonical import canonical_json, sha256_hex
-from src.experiment.schemas import ExperimentSpec
+from src.experiment.schemas import ExperimentSpec, spec_dump
 from src.experiment.validation import validate_spec
 
 GOLDEN_SPEC: dict[str, object] = {
@@ -74,5 +74,9 @@ def test_default_omission_same_fingerprint() -> None:
     fp_completed = validate_spec(completed).config_fingerprint
     assert fp_omitted is not None and fp_completed is not None
     assert fp_omitted == fp_completed
-# the fingerprint is computed over the parsed, normalized object
-    assert fp_omitted == sha256_hex(canonical_json(ExperimentSpec.model_validate(omitted).model_dump()))
+    # the fingerprint is computed over the parsed, normalized object.
+    # M2-B (D-M2-1 §1.1): the reference formula is the spec_dump() projection
+    # (bare model_dump() now carries the None-defaulted v2 keys, which the
+    # projection removes — v1 fingerprints are unchanged by construction,
+    # proven in test_v1_compatibility.py).
+    assert fp_omitted == sha256_hex(canonical_json(spec_dump(ExperimentSpec.model_validate(omitted))))

@@ -18,7 +18,7 @@ from __future__ import annotations
 from itertools import product
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 MAX_COMBINATIONS = 100_000  # V9 / CR-7 guard
 MAX_BLOCK_TRIAL_COUNT = 100_000  # CR-7 guard
@@ -140,7 +140,7 @@ class TimingSpec(BaseModel):
 class ExperimentSpec(BaseModel):
     """Experiment spec (Phase A: paradigm must be null — non-null goes to the validation layer's UNKNOWN_PARADIGM)."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     name: str = Field(min_length=1)
     version: str = "0.1.0"
     seed: int = Field(ge=0, le=MAX_SEED)
@@ -151,6 +151,11 @@ class ExperimentSpec(BaseModel):
     constraints: Constraints = Constraints()
     responses: list[ResponseVar] = Field(min_length=1)
     timing: TimingSpec = TimingSpec()
+    # M2-B v2 research-layer fields (schema_version 2 only; None = feature absent;
+    # explicit null is treated as absent — see spec_dump() below)
+    stimulus_spec: StimulusSpec | None = None
+    derived_spec: list[DerivedOpSpec] | None = None
+    measures: list[MeasureSpec] | None = None
 
     @field_validator("factors")
     @classmethod
@@ -282,6 +287,76 @@ class Trial(BaseModel):
     timing: TimingSpec
 
 
+# ---------------------------------------------------------------------------
+# M2-B v2 research-layer models (D-M2-1 contract, schema_version 2 only)
+#
+# Shape-only here (types + extra="forbid"); count/length bounds and reference
+# semantics live in the v2 semantic validator (src/experiment/stimulus.py,
+# surfaced through validation.py with V2_* error codes). extra="forbid" keeps
+# unknown keys out of every dump (fingerprint integrity), surfacing them as
+# SCHEMA_INVALID with precise paths.
+# ---------------------------------------------------------------------------
+
+
+class _V2Forbid(BaseModel):
+    """Base for v2 models: reject unknown keys (no smuggled content into dumps)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class StimulusFactorSpec(_V2Forbid):
+    """Per-factor stimulus definition: level name -> templates.
+
+    A template is a list of line strings; a level carries 1..MAX templates
+    (bounds checked semantically, V2_STIM_TEMPLATE_BOUNDS). match_line_count=true
+    requires every template of every level of this factor to produce the same
+    number of lines (confound control, DESIGN_REVIEW §2).
+    """
+
+    levels: dict[str, list[list[str]]]
+    match_line_count: bool = True
+
+
+class StimulusSpec(_V2Forbid):
+    """Paradigm-independent stimulus materialization config.
+
+    Generic vocabulary only: factors, levels, named text pools. Slot syntax
+    inside a line: {<factor_name>} -> the trial's assigned level name;
+    {pool:<pool_name>} -> one line drawn from that pool by the trial's seeded
+    stream. No field here references any task, genre, or paradigm.
+    """
+
+    factors: dict[str, StimulusFactorSpec]
+    pools: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class DerivedOpSpec(_V2Forbid):
+    """One declared derived value (closed op whitelist, checked semantically).
+
+    MVP whitelist: trial_number (no args), block_progress (no args),
+    count_factor_level (args: factor, level). Values are computed by the engine
+    deterministically from trial context only (index, block, factor assignment)
+    and are always int.
+    """
+
+    name: str
+    op: str
+    args: dict[str, str] = Field(default_factory=dict)
+
+
+class MeasureSpec(_V2Forbid):
+    """Declared measurement intent (metadata only, no runtime collection claim).
+
+    source is a dotted log-field path (e.g. "response.rt_ms"); it is validated
+    syntactically only. The bundle carries this as documentation; conformance of
+    actual logs is verified by M2-D's reconciliation, not by the engine.
+    """
+
+    name: str
+    source: str
+    notes: str | None = None
+
+
 class GeneratedExperiment(BaseModel):
     """Return value of generate_trials (§2.4)."""
 
@@ -290,3 +365,34 @@ class GeneratedExperiment(BaseModel):
     engine_spec_version: str
     plugin_used: str | None  # always None in Phase A
     trials: list[Trial]
+
+
+# ---------------------------------------------------------------------------
+# v2 serialization projection (M2-B, D-M2-1 contract §1.1)
+# ---------------------------------------------------------------------------
+
+# Optional v2 research-layer fields on ExperimentSpec (M2-B contract). These are
+# None-defaulted: a field appears in spec_dump() output iff it is not None.
+_V2_OPTIONAL_FIELDS: tuple[str, ...] = ("stimulus_spec", "derived_spec", "measures")
+
+
+def spec_dump(spec: ExperimentSpec) -> dict[str, object]:
+    """Canonical projection of an ExperimentSpec for fingerprinting and bundle storage.
+
+    model_dump() with UNSET v2 fields removed. Field-state handling (M2-B contract):
+
+    - absent (field omitted by the caller) → None → **removed** from the dump;
+    - explicitly null (caller passed the key with value null) → None → **removed**,
+      i.e. explicit null is equivalent to absent by design (both mean "no v2 feature");
+    - populated → kept, and covered by config_fingerprint / bundle_sha256.
+
+    Consequently a v1-shaped spec (schema_version 1, no v2 fields set) produces a
+    dump with zero v2 keys — byte-identical to the historical bare model_dump().
+    This is the single projection used at all three serialization call sites
+    (generation, validation, export); bare spec.model_dump() is forbidden there.
+    """
+    dump = spec.model_dump()
+    for field_name in _V2_OPTIONAL_FIELDS:
+        if dump.get(field_name) is None:
+            dump.pop(field_name, None)
+    return dump

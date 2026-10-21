@@ -67,7 +67,20 @@ class _ExperimentBlocked(Exception):
 class ValidateExperimentInput(BaseModel):
     """validate_experiment arguments (contract §5.1)."""
 
-    config: dict[str, object]  # the ExperimentSpec JSON object (generated inline by the LLM)
+    # The config field description is the v2 documentation surface (M2-B): it
+    # travels with the tools JSON schema to the LLM while the ToolSpec-level
+    # description stays within the token budget test's limits.
+    config: dict[str, object] = Field(
+        description=(
+            "The ExperimentSpec JSON object itself (no wrapper). schema_version=1: see the tool "
+            "description example. Optional schema_version=2 research fields (omit when unused): "
+            "stimulus_spec={factors:{name:{levels:{level:[templates]}},match_line_count}},pools} "
+            "where a template is a list of text lines with slots {factor_name} (substitutes the "
+            "trial's assigned level) and {pool:name} (draws one pool line); derived_spec=[{name,op,"
+            "args}] with ops trial_number, block_progress, count_factor_level(factor,level); "
+            "measures=[{name,source}] declared measurement metadata (no runtime collection claim)."
+        )
+    )
     previous_errors: list[str] = Field(default_factory=list)  # error_code:path fingerprints of previous rounds
 
 
@@ -214,7 +227,8 @@ def build_validate_spec(settings: Settings) -> ToolSpec:
             "Top keys: schema_version(=1),name,seed,factors[{name,levels[{name}]}],"
             "blocks[{name,trial_count}],constraints{balance},"
             "responses[{name,kind,options,correct_from}],timing{fixation_ms,stimulus_ms,isi_ms}. "
-            "Minimal example: "
+            "Optional v2 fields: stimulus_spec,derived_spec,measures."
+            " Minimal example: "
             + _SPEC_EXAMPLE_JSON
         ),
         input_model=ValidateExperimentInput,

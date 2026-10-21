@@ -29,7 +29,12 @@ from src.experiment.generation import (
     mutex_pairs,
     positive_weight_combos,
 )
-from src.experiment.schemas import ExperimentSpec
+from src.experiment.schemas import ExperimentSpec, _V2_OPTIONAL_FIELDS, spec_dump
+from src.experiment.stimulus import (
+    validate_derived_spec,
+    validate_measures,
+    validate_stimulus_spec,
+)
 
 MAX_ERRORS = 20  # errors cap (§5.1)
 
@@ -50,6 +55,29 @@ class ErrorCode:
     CORRECT_FROM_UNKNOWN = "CORRECT_FROM_UNKNOWN"
     SEARCH_EXHAUSTED = "SEARCH_EXHAUSTED"  # not triggerable in Phase A (framework-reserved, §4.2/§4.3)
     ITERATION_STALLED = "ITERATION_STALLED"
+
+    # M2-B v2 research-layer codes (D-M2-1 contract; additive — the v1 table above is untouched)
+    V2_VERSION_MISMATCH = "V2_VERSION_MISMATCH"
+    V2_STIM_EMPTY = "V2_STIM_EMPTY"
+    V2_STIM_FACTOR_BOUNDS = "V2_STIM_FACTOR_BOUNDS"
+    V2_STIM_UNKNOWN_FACTOR = "V2_STIM_UNKNOWN_FACTOR"
+    V2_STIM_UNKNOWN_LEVEL = "V2_STIM_UNKNOWN_LEVEL"
+    V2_STIM_LEVEL_COVERAGE = "V2_STIM_LEVEL_COVERAGE"
+    V2_STIM_TEMPLATE_BOUNDS = "V2_STIM_TEMPLATE_BOUNDS"
+    V2_STIM_LINE_BOUNDS = "V2_STIM_LINE_BOUNDS"
+    V2_STIM_LINE_COUNT_MISMATCH = "V2_STIM_LINE_COUNT_MISMATCH"
+    V2_STIM_POOL_BOUNDS = "V2_STIM_POOL_BOUNDS"
+    V2_STIM_SLOT_SYNTAX = "V2_STIM_SLOT_SYNTAX"
+    V2_STIM_UNRESOLVED_SLOT = "V2_STIM_UNRESOLVED_SLOT"
+    V2_DERIVED_UNKNOWN_OP = "V2_DERIVED_UNKNOWN_OP"
+    V2_DERIVED_BAD_NAME = "V2_DERIVED_BAD_NAME"
+    V2_DERIVED_DUPLICATE_NAME = "V2_DERIVED_DUPLICATE_NAME"
+    V2_DERIVED_BAD_ARGS = "V2_DERIVED_BAD_ARGS"
+    V2_DERIVED_BOUNDS = "V2_DERIVED_BOUNDS"
+    V2_MEASURE_BAD_NAME = "V2_MEASURE_BAD_NAME"
+    V2_MEASURE_DUPLICATE_NAME = "V2_MEASURE_DUPLICATE_NAME"
+    V2_MEASURE_BAD_SOURCE = "V2_MEASURE_BAD_SOURCE"
+    V2_MEASURE_BOUNDS = "V2_MEASURE_BOUNDS"
 
 
 class WarningCode:
@@ -399,6 +427,42 @@ def _check_block_satisfiability(
             )
 
 
+def _check_v2_fields(spec: ExperimentSpec, errors: list[ValidationIssue]) -> None:
+    """M2-B v2 research-layer checks (D-M2-1 contract §1.5/§1.7).
+
+    - schema_version 1 with any v2 field SET (including explicit null) → V2_VERSION_MISMATCH;
+    - schema_version 2: run the v2 semantic validators for each SET feature.
+    Explicit null on schema_version 2 is equivalent to absent (no checks, no dump key).
+    """
+    v2_set = [name for name in _V2_OPTIONAL_FIELDS if name in spec.model_fields_set]
+    if spec.schema_version == 1:
+        for name in v2_set:
+            errors.append(
+                ValidationIssue(
+                    error_code=ErrorCode.V2_VERSION_MISMATCH,
+                    path=name,
+                    message=(
+                        f"field {name!r} is a schema_version 2 feature but this spec "
+                        "declares schema_version 1"
+                    ),
+                    suggestion="set schema_version to 2 to use v2 research fields, "
+                    "or remove the field",
+                )
+            )
+        return
+    raw_issues: list[tuple[str, str, str, str]] = []
+    if spec.stimulus_spec is not None:
+        raw_issues.extend(validate_stimulus_spec(spec))
+    if spec.derived_spec is not None:
+        raw_issues.extend(validate_derived_spec(spec))
+    if spec.measures is not None:
+        raw_issues.extend(validate_measures(spec))
+    for code, path, message, suggestion in raw_issues:
+        errors.append(
+            ValidationIssue(error_code=code, path=path, message=message, suggestion=suggestion)
+        )
+
+
 def validate_spec(config: Mapping[str, object]) -> ValidationResult:
     """Entry point: Pydantic → support → constraint semantics → per-block satisfiability (frozen order)."""
     errors: list[ValidationIssue] = []
@@ -415,7 +479,8 @@ def validate_spec(config: Mapping[str, object]) -> ValidationResult:
     _check_support(spec, errors)
     _check_constraint_semantics(spec, errors, warnings)
     _check_block_satisfiability(spec, errors, warnings)
-    fingerprint = sha256_hex(canonical_json(spec.model_dump()))
+    _check_v2_fields(spec, errors)
+    fingerprint = sha256_hex(canonical_json(spec_dump(spec)))
     return _finalize(spec, errors, warnings, fingerprint, _stats(spec, config))
 
 
