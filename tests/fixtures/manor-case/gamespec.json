@@ -1,0 +1,336 @@
+{
+  "schema_version": 2,
+  "game": {
+    "name": "manor-case",
+    "version": "0.1.0"
+  },
+  "experiment_ref": {
+    "name": "manor-case",
+    "version": "0.1.0",
+    "seed": 20261021,
+    "config_fingerprint": "711c7d77c22adef1735703992609a06398baf8ad8a86e976a573a41e49c3e3e6",
+    "trials_fingerprint": "800350f2a9f5182f5acb6dd308fbe48b135486bff29a3797989154bd68908da4",
+    "bundle_sha256": "b44bd0464bc9910c6ed26df63b5b5aafcee12b8971cc1da932690d6b7ce915ec"
+  },
+  "scene": {
+    "title": "The Manor Case",
+    "instructions": "Re-examine the closed case. Explore the manor, examine what you find, and judge which suspect each piece of evidence supports. Keys: a / b / c."
+  },
+  "input": {
+    "modalities": [
+      "keyboard"
+    ],
+    "bindings": [
+      {
+        "response_name": "accuse",
+        "keys": {
+          "a": "a",
+          "b": "b",
+          "c": "c"
+        }
+      }
+    ]
+  },
+  "feedback": {
+    "on_response": "none",
+    "duration_ms": 0
+  },
+  "world": {
+    "rooms": {
+      "hall": {
+        "title": "Entrance Hall",
+        "description": "A drafty hall; coats on pegs, a clock that lost interest in time.",
+        "exits": {
+          "study": "a heavy oak door",
+          "library": "a creaking passage"
+        },
+        "objects": [
+          {
+            "object_id": "dusty-clock",
+            "label": "dusty clock",
+            "inspect_text": "It stopped at 3:14. Nobody remembers why.",
+            "role": "flavour"
+          },
+          {
+            "object_id": "calling-card",
+            "label": "calling card",
+            "inspect_text": "A card left face-down on the hall table.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "torn-invitation",
+            "label": "torn invitation",
+            "inspect_text": "Half an invitation, torn diagonally.",
+            "role": "encounter"
+          }
+        ]
+      },
+      "study": {
+        "title": "The Study",
+        "description": "Books stacked spine-inward; a desk that has seen arguments.",
+        "exits": {
+          "hall": "back to the hall",
+          "parlour": "through the side door"
+        },
+        "objects": [
+          {
+            "object_id": "desk-ledger",
+            "label": "desk ledger",
+            "inspect_text": "A ledger lies open at the centre page.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "hearth-ash",
+            "label": "hearth ash",
+            "inspect_text": "Something was burned here, recently.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "portrait-x",
+            "label": "marked portrait",
+            "inspect_text": "A portrait with a scratched corner.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "letter-rack",
+            "label": "letter rack",
+            "inspect_text": "Letters sorted by no visible system.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "wax-seal",
+            "label": "wax seal",
+            "inspect_text": "A seal stamped with an unfamiliar crest.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "inkwell",
+            "label": "inkwell",
+            "inspect_text": "Ink still wet around the rim.",
+            "role": "encounter"
+          }
+        ]
+      },
+      "library": {
+        "title": "The Library",
+        "description": "Two floors of books and one ladder that complains.",
+        "exits": {
+          "hall": "back to the hall",
+          "parlour": "past the atlas shelf"
+        },
+        "objects": [
+          {
+            "object_id": "wine-ledger",
+            "label": "wine ledger",
+            "inspect_text": "A heavy ledger records the cellar stores.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "atlas-margin",
+            "label": "atlas margin",
+            "inspect_text": "Notes crowd the margin of one map.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "lamp-oil",
+            "label": "lamp oil",
+            "inspect_text": "Oil bought in an unusual quantity.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "reading-list",
+            "label": "reading list",
+            "inspect_text": "A list in a careful hand.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "book-plate",
+            "label": "book plate",
+            "inspect_text": "A bookplate peeled half away.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "index-card",
+            "label": "index card",
+            "inspect_text": "One card misfiled on purpose?",
+            "role": "encounter"
+          }
+        ]
+      },
+      "parlour": {
+        "title": "The Parlour",
+        "description": "Where the household performed its evenings.",
+        "exits": {
+          "study": "back to the study",
+          "library": "back to the library",
+          "cellar": "down the cellar stairs"
+        },
+        "objects": [
+          {
+            "object_id": "tea-cup",
+            "label": "tea cup",
+            "inspect_text": "Two cups, one guest.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "piano-key",
+            "label": "piano key",
+            "inspect_text": "One key is freshly chipped.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "card-table",
+            "label": "card table",
+            "inspect_text": "Cards dealt but never played.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "window-frost",
+            "label": "frost on the window",
+            "inspect_text": "A patch melted from the inside.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "coat-check",
+            "label": "coat peg",
+            "inspect_text": "One coat heavier than it should be.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "mirror-crack",
+            "label": "cracked mirror",
+            "inspect_text": "The crack follows a deliberate line.",
+            "role": "encounter"
+          }
+        ]
+      },
+      "cellar": {
+        "title": "The Cellar",
+        "description": "Cold, exact, and honest about what the house stores.",
+        "exits": {
+          "parlour": "up the stairs"
+        },
+        "objects": [
+          {
+            "object_id": "crate-label",
+            "label": "crate label",
+            "inspect_text": "A label rewritten twice.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "barrel-mark",
+            "label": "barrel mark",
+            "inspect_text": "Chalk marks count the withdrawals.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "tool-rack",
+            "label": "tool rack",
+            "inspect_text": "One tool cleaned, the others not.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "cobweb-corner",
+            "label": "cobweb corner",
+            "inspect_text": "A web broken in one straight line.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "stair-scuff",
+            "label": "stair scuff",
+            "inspect_text": "Scuffs that match no current shoe.",
+            "role": "encounter"
+          },
+          {
+            "object_id": "box-lid",
+            "label": "box lid",
+            "inspect_text": "A lid that no longer sits flush.",
+            "role": "encounter"
+          }
+        ]
+      }
+    },
+    "start_room": "hall"
+  },
+  "narrative": {
+    "intro": "The case was closed in a hurry. You have one evening in the manor to re-examine what remains.",
+    "block_briefings": {
+      "practice": "A short warm-up round: examine the first pieces of evidence.",
+      "investigation": "The re-examination begins in earnest. Trust the record, not the story."
+    },
+    "ending_bands": [
+      {
+        "min_accuracy": 0.0,
+        "text": "The file returns to the shelf, unread."
+      },
+      {
+        "min_accuracy": 0.5,
+        "text": "Some threads hold. The report is amended with care."
+      },
+      {
+        "min_accuracy": 0.8,
+        "text": "The record speaks plainly. The case is reopened."
+      }
+    ]
+  },
+  "mechanics": {
+    "layout": "explore-and-encounter",
+    "inspect_objects": true,
+    "trial_trigger": "explore-encounter"
+  },
+  "mapping": {
+    "trial_trigger": "explore-encounter",
+    "encounter_objects": [
+      "calling-card",
+      "torn-invitation",
+      "desk-ledger",
+      "hearth-ash",
+      "portrait-x",
+      "letter-rack",
+      "wax-seal",
+      "inkwell",
+      "wine-ledger",
+      "atlas-margin",
+      "lamp-oil",
+      "reading-list",
+      "book-plate",
+      "index-card",
+      "tea-cup",
+      "piano-key",
+      "card-table",
+      "window-frost",
+      "coat-check",
+      "mirror-crack",
+      "crate-label",
+      "barrel-mark",
+      "tool-rack",
+      "cobweb-corner",
+      "stair-scuff",
+      "box-lid"
+    ],
+    "response_bindings": [
+      {
+        "response_name": "accuse",
+        "keys": {
+          "a": "a",
+          "b": "b",
+          "c": "c"
+        }
+      }
+    ],
+    "creative_freedom": [
+      "theme",
+      "room_labels",
+      "object_labels",
+      "narrative_text",
+      "feedback_style"
+    ],
+    "controlled_invariants": [
+      "trial_order",
+      "conditions",
+      "stimulus_content",
+      "correct_answers",
+      "timing"
+    ]
+  }
+}

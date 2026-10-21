@@ -1,0 +1,107 @@
+{
+  "schema_version": 2,
+  "name": "manor-case",
+  "version": "0.1.0",
+  "seed": 20261021,
+  "factors": [
+    {
+      "name": "salience",
+      "levels": [
+        {
+          "name": "salient"
+        },
+        {
+          "name": "embedded"
+        }
+      ]
+    },
+    {
+      "name": "true_suspect",
+      "levels": [
+        {
+          "name": "a"
+        },
+        {
+          "name": "b"
+        },
+        {
+          "name": "c"
+        }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "name": "practice",
+      "trial_count": 6
+    },
+    {
+      "name": "investigation",
+      "trial_count": 20
+    }
+  ],
+  "constraints": {
+    "balance": true
+  },
+  "responses": [
+    {
+      "name": "accuse",
+      "kind": "choice",
+      "options": [
+        "a",
+        "b",
+        "c"
+      ],
+      "correct_from": "true_suspect"
+    }
+  ],
+  "timing": {
+    "fixation_ms": 300,
+    "stimulus_ms": null,
+    "isi_ms": 500
+  },
+  "stimulus_spec": {
+    "factors": {
+      "salience": {
+        "levels": {
+          "salient": [
+            [
+              "A clear record: payments traced to suspect {true_suspect}.",
+              "The page is otherwise clean.",
+              "The ink is fresh.",
+              "Nothing distracts the eye."
+            ]
+          ],
+          "embedded": [
+            [
+              "Shelves of unrelated ledgers crowd the desk.",
+              "A torn receipt mentions suspect {true_suspect}.",
+              "Frost obscures half the margin.",
+              "Someone has dog-eared every page."
+            ]
+          ]
+        },
+        "match_line_count": true
+      }
+    },
+    "pools": {}
+  },
+  "derived_spec": [
+    {
+      "name": "trial_number",
+      "op": "trial_number"
+    }
+  ],
+  "measures": [
+    {
+      "name": "accuracy",
+      "source": "response.correct",
+      "notes": "per-condition accuracy"
+    },
+    {
+      "name": "rt",
+      "source": "response.rt_ms",
+      "notes": "demo-grade browser timing"
+    }
+  ]
+}
