@@ -1,45 +1,77 @@
 # CognitiveAgent Lab
 
-An engineering-first AI agent system: a single agent main loop drives a **deterministic
-experiment-generation pipeline** — starting from an ExperimentSpec it produces a reproducible
-trial sequence (ExperimentBundle), then renders it through a GameSpec into a **single-file HTML
-game** that opens directly via `file://`, with experiment logic that the presentation layer
-cannot tamper with.
+A deterministic pipeline that turns a structured experiment specification into a
+reproducible trial sequence and a **single-file, browser-playable HTML game** — with
+the experiment logic sealed off from the presentation layer.
+
+It also ships a small single-loop agent runtime (tool registry + agent loop) that
+drives this pipeline. **Important:** that agent path is currently validated only with
+a scripted fake LLM; real-LLM end-to-end reliability is not yet established
+([details below](#status-what-is-validated-what-is-not)). Today, the dependable core
+of this project is the deterministic experiment→game pipeline, not the agent.
+
+> **Developer preview** — an experiment-generation scaffold with unusual
+> reproducibility discipline, not a general agent framework and not a
+> research-grade data-collection tool.
 
 ```
-Natural-language task (researcher prompt)
-  → ExperimentSpec ──validate_experiment──┐
-  → trial sequence generate_trials (byte-reproducible for the same spec+seed)
-  → ExperimentBundle export_experiment (with SHA-256 integrity fingerprints)
-  → GameSpec ──validate_game (references six fingerprints; presentation only, cannot alter the experiment)──┘
-  → render_game → single-file playable HTML (embedded dual-fingerprint startup check + event log)
+ExperimentSpec (JSON, validated)
+  → deterministic trial sequence (same spec + seed → byte-identical trials, always)
+  → ExperimentBundle (JSON artifact with SHA-256 integrity fingerprints)
+  → GameSpec (presentation-only description, validated against the bundle)
+  → single-file HTML game (opens via file://; keyboard input; embedded event log)
 ```
 
-> **Developer preview.** The first demo shows multi-step tool execution plus the deterministic
-> experiment→game pipeline — not a paper-grade research assistant.
-> Out of scope: multi-agent collaboration, RAG, authentication, formal data collection
-> (timing is demo-grade). See "Validated capabilities vs limitations" below.
+## What this is — and is not
 
-## Validated capabilities vs limitations
+**This is:**
 
-**Validated** (automated by the 213-test suite, deterministic, no LLM keys required):
+- A deterministic generator for game-based cognitive experiments: you describe
+  factors, levels, blocks, responses and timing; it produces a reproducible trial
+  sequence and a playable single-file HTML game.
+- A scaffold that keeps the game/presentation layer from touching experiment
+  logic (trials, conditions, correct answers) — verified, not just promised.
+- A single-loop agent runtime with a tool registry, which the deterministic
+  pipeline is wired into as tools — exercised end-to-end with a scripted fake
+  LLM in tests and the `demo` command.
 
-- The full ExperimentSpec → trials → ExperimentBundle pipeline, byte-reproducible for the
-  same spec+seed (dual SHA-256 fingerprints, independent generator-free verification CLI)
-- The GameSpec → validate_game → render_game chain: single-file HTML, byte-identical
-  re-renders, embedded fingerprint startup check, anti-tamper schema boundaries
-- The end-to-end agent workflow driven by a scripted fake LLM
-  (`examples/run_game_agent.py`), with two-layer verification that refuses to pass
-  tampered or missing artifacts silently
-- Tool-security boundaries (calc AST whitelist, http_request SSRF chain, file_write sandbox)
+**This is not:**
 
-**Not validated / not working**:
+- A general-purpose AI agent framework (one loop, eight tools, no planning
+  subsystem, no memory, no multi-agent anything).
+- A validated natural-language assistant: "describe an experiment in English and
+  the agent designs it" does **not** reliably work yet — see the PA-14 note.
+- A security mechanism: the "experiment/presentation separation" below is about
+  design integrity (the game layer cannot silently redefine your experiment),
+  not about defending against a hostile user who edits the HTML file.
+- A data-collection instrument: browser timing is approximate, event logs are
+  not force-persisted. Do not use it for formal experimental data.
 
-- **Real-LLM end-to-end is unfinished (known issue PA-14)**: on qwen2.5:7b + Ollama
-  0.40.6, tool calls are silently dropped. All agent workflows are currently validated
-  with FakeLLM only; a real LLM has been exercised only against the M1 basic tools.
-  The LLM interface (`LLMClientProtocol`) is swappable, and real-LLM integration is
-  deferred. See the detailed limitation notes below for the rest.
+## Status: what is validated, what is not
+
+**Validated** (automated by the 225-test suite; deterministic; no LLM keys required):
+
+- The full ExperimentSpec → trials → ExperimentBundle pipeline: byte-reproducible
+  for the same spec+seed, with dual SHA-256 fingerprints and an independent
+  verification CLI that recomputes them without the generator.
+- The GameSpec → validate → render chain: single-file HTML, byte-identical
+  re-renders, fingerprint startup check inside the HTML, schema-level separation
+  of experiment semantics from presentation.
+- The agent workflow shape (tool call order, error iteration, verification)
+  driven by a scripted fake LLM — including that tampered or missing artifacts
+  fail loudly instead of passing silently.
+- Tool-security boundaries (calc AST whitelist, http_request SSRF chain,
+  file_write sandbox).
+
+**Not validated:**
+
+- **Real-LLM end-to-end (known issue PA-14).** On the tested stack
+  (qwen2.5:7b + Ollama 0.40.6) tool calls are silently dropped. Every agent
+  workflow in the test suite runs against FakeLLM; a real LLM has been
+  exercised only against the three basic M1 tools. The LLM interface
+  (`LLMClientProtocol`) is swappable, and real-LLM integration is deferred.
+  In short: **the 225 tests prove the scaffold is reproducible; they do not
+  prove a real LLM can drive it.**
 
 ## Quick start (no LLM keys required)
 
@@ -49,7 +81,7 @@ python3.13 -m venv .venv
 .venv/bin/pip install -e .
 
 # 2. Deterministic demo (scripted fake LLM — no network, no keys):
-#    the full agent workflow validate_experiment → generate_trials
+#    the full workflow validate_experiment → generate_trials
 #    → export_experiment → validate_game → render_game → playable HTML,
 #    verified bundle + byte-identical HTML.
 cognitive-agent demo
@@ -72,6 +104,9 @@ cognitive-agent verify data/experiments/demo-agent-game.json
 | Console script | `cognitive-agent` (installed on PATH by `pip install`) |
 | Dependencies | FastAPI, Pydantic v2, pydantic-settings, httpx, openai SDK — nothing else (see pyproject.toml) |
 | Keys | Optional; `demo` and the whole test suite need zero keys |
+
+A [Codex Agent Skill](skills/cognitive-agent/SKILL.md) is included, so external
+agents can run the same deterministic workflows (install guidance in the skill file).
 
 ## Configuration
 
@@ -104,7 +139,7 @@ cognitive-agent demo --output out/my-first-experiment
 
 # Run a natural-language task with your configured real LLM provider
 # (experimental: real-LLM end-to-end reliability is not yet validated —
-#  see "Validated capabilities vs limitations" above)
+#  see "Status" above)
 cognitive-agent run "design a 2x2 attention experiment with 80 trials and render a playable game"
 
 # Confine the run's generated files to a directory
@@ -145,19 +180,19 @@ result.html_verified           # bool | None — byte-identity vs deterministic 
 Any `LLMClientProtocol` implementation can be injected as `client=` (that is
 how the test suite drives the same loop deterministically with FakeLLM).
 
+You can also skip the agent entirely and call the engine directly —
+`build_bundle` / `validate_game` / `render_game_html` / `verify_bundle` are
+pure functions (see `examples/run_game_render.py` and the
+[Codex skill](skills/cognitive-agent/SKILL.md) for a complete worked example).
+
 Other examples (repo clone only):
 
 ```bash
 .venv/bin/python examples/run_game_render.py      # pure-function game generation, no agent
-.venv/bin/python examples/run_experiment_agent.py # Phase A: the three experiment tools workflow
-.venv/bin/python examples/run_agent.py            # M1: the three basic tools (requires a real LLM)
-.venv/bin/python examples/run_game_agent.py       # B3 end-to-end demo (same flow as `cognitive-agent demo`)
+.venv/bin/python examples/run_experiment_agent.py # the three experiment tools workflow
+.venv/bin/python examples/run_agent.py            # the three basic tools (requires a real LLM)
+.venv/bin/python examples/run_game_agent.py       # end-to-end demo (same flow as `cognitive-agent demo`)
 ```
-
-**Real-LLM reliability caveat**: `cognitive-agent run` and `run_task` with a
-real provider are experimental — real-LLM end-to-end reliability is **not yet
-validated** (known issue PA-14, see "Validated capabilities vs limitations").
-`cognitive-agent demo` / `run_demo` are the deterministic, fully verified paths.
 
 ## Architecture
 
@@ -167,25 +202,31 @@ src/
 ├── pipeline.py    Public Python API facade (run_task / run_demo / PipelineResult)
 ├── agent/         AgentLoop (plan→act→observe single loop), ToolRegistry, registry combinators
 ├── tools/         Tool layer: calc / http_request / file_write (the three M1 tools)
-│                  + validate_experiment / generate_trials / export_experiment (Phase A)
-│                  + validate_game / render_game (Phase B)
+│                  + validate_experiment / generate_trials / export_experiment
+│                  + validate_game / render_game
 ├── experiment/    Deterministic experiment engine: schemas / validation / generation / export /
 │                  verify (generator-free independent verification CLI) / game_schemas / game_render
 ├── models/        Pydantic models (LLM, tool specs, events, results)
-└── api/           FastAPI + SSE event stream (M1)
+└── api/           FastAPI + SSE event stream
 ```
 
-**Four anti-tamper defenses** (the game layer cannot change experiment conditions/trials/correctness):
+**Experiment/presentation separation** — how the game layer is kept from
+redefining the experiment (a design-integrity mechanism, *not* a security
+feature against a user who edits the HTML):
 
-1. The GameSpec schema uses `extra="forbid"` — experiment-semantics fields (e.g. trials) are rejected outright;
-2. The renderer is the sole consumer of trials; trials/correct answers are copied only from the ExperimentBundle;
-3. The HTML embeds a pure-JS SHA-256 implementation and verifies bundle_sha256 +
-   trials_fingerprint at startup, refusing to start on mismatch;
-4. pytest logic-core reconciliation (golden-file byte comparison + 100% trial/correctness agreement).
+1. The GameSpec schema rejects experiment-semantics fields outright
+   (`extra="forbid"` — a smuggled `trials` key fails validation);
+2. The renderer takes trials and correct answers **only** from the
+   ExperimentBundle — the GameSpec has no way to express them;
+3. The rendered HTML checks its embedded bundle fingerprints at startup and
+   refuses to start on mismatch (so accidental divergence is caught, though a
+   deliberate editor can of course remove the check);
+4. pytest reconciliation: golden-file byte comparison plus 100% agreement of
+   rendered trials/correctness with the bundle.
 
-**Two-tier error contract**: tool-level failures → `BLOCKED:` prefix; domain-level failures →
-`ok=true, valid:false` structured reports (error_code / path / suggestion) for LLM iteration,
-with repeated submissions triggering `ITERATION_STALLED`.
+Internal error-handling details (two-tier tool/domain error contract,
+`ITERATION_STALLED` on repeated failed submissions) are documented in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Detailed design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ｜
 Phase A/B frozen contracts: [docs/handoff/](docs/handoff/) ｜
@@ -194,15 +235,18 @@ Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md)
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest            # full test suite (213 tests, no keys needed)
+.venv/bin/python -m pytest            # full test suite (225 tests, no keys needed)
 .venv/bin/python -m pyright src/      # static typing (0 errors)
 .venv/bin/python -m scripts.check_layers  # layering dependency check
 scripts/check.sh                      # CI gate (all of the above + secret scan + compile check)
 ```
 
-Determinism acceptance highlights: rerunning with the same spec+seed → identical bundle
-fingerprints and byte-identical HTML (PYTHONHASHSEED-independent, cross-verified with the
-external `shasum` tool); golden files live in `tests/golden/`.
+What the suite covers: deterministic generation (same spec+seed → identical
+fingerprints, byte-identical HTML, PYTHONHASHSEED-independent), schema
+boundaries, tool-security rules, golden files, and the FakeLLM-driven agent
+workflow. It is reproducibility evidence for the scaffold — read it alongside
+the [status section](#status-what-is-validated-what-is-not), not as evidence
+of real-LLM capability.
 
 ## Browser playtest checklist
 
