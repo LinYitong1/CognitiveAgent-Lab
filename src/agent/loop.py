@@ -19,6 +19,16 @@ _SYSTEM_PROMPT = (
     "You are an agent that executes multi-step tasks. Available tools are provided via the tools parameter. Call a tool whenever external capability is needed."
     "Tool failures come back as tool results prefixed with ERROR:. Retry with different arguments or change strategy."
     "Once the goal is achieved, give the final answer text directly and stop calling tools."
+    "\n\n"
+    "When the task is to design an experiment or a game from a research requirement, work design-first and check your own output:"
+    "1) Before the first tool call, state a brief design: the manipulation (factors, levels, and what each level actually changes in the presented content),"
+    " the measured responses, the player's actions, and how the game behavior maps onto the cognitive task."
+    "2) Implement the design with the tools in this order: validate_experiment (iterate until valid) -> generate_trials (review level frequencies) ->"
+    " export_experiment -> file_read the exported bundle -> validate_game -> render_game."
+    "3) After exporting, file_read the bundle and CHECK that the design actually holds: trial counts and balance match the design,"
+    " factor levels produce genuinely different stimulus content (a level that only renames a label while the content stays identical is a design failure),"
+    " and correct answers follow the actual content when the design says so."
+    "4) If a check fails, revise the spec or game config and re-run the affected tools; never declare success over an unverified artifact."
 )
 
 _SUMMARY_LIMIT = 512
