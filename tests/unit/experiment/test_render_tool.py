@@ -182,8 +182,11 @@ def test_br9_registry_registers_five_tools_with_ascii_description() -> None:
     registry = build_game_registry(Settings(data_sandbox_dir=str(TEST_SANDBOX)))
     schemas = registry.get_schemas()
     names = {s["function"]["name"] for s in schemas}
+    # M3-B: file_read joins the base tool set (generic sandbox read for the
+    # agent's check-your-artifacts workflow); the five experiment/game tools
+    # and the three M1 tools are unchanged
     assert names == {
-        "calc", "http_request", "file_write",
+        "calc", "http_request", "file_write", "file_read",
         "validate_experiment", "generate_trials", "export_experiment",
         "validate_game", "render_game",
     }
