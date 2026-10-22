@@ -26,6 +26,7 @@ from src.experiment.schemas import (
     GeneratedExperiment,
     Trial,
     spec_dump,
+    trial_dump,
 )
 from src.experiment.stimulus import materialize_trials
 
@@ -236,7 +237,7 @@ def generate_trials(spec: ExperimentSpec, max_attempts: int = 100) -> GeneratedE
         materialize_trials(spec, trials)
 
     config_fingerprint = sha256_hex(canonical_json(spec_dump(spec)))
-    trials_fingerprint = sha256_hex(canonical_json([trial.model_dump() for trial in trials]))
+    trials_fingerprint = sha256_hex(canonical_json([trial_dump(trial) for trial in trials]))
     return GeneratedExperiment(
         config_fingerprint=config_fingerprint,
         trials_fingerprint=trials_fingerprint,

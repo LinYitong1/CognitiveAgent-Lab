@@ -31,9 +31,12 @@ from src.experiment.generation import (
 )
 from src.experiment.schemas import ExperimentSpec, _V2_OPTIONAL_FIELDS, spec_dump
 from src.experiment.stimulus import (
+    validate_correct_rules,
     validate_derived_spec,
     validate_measures,
+    validate_phases,
     validate_stimulus_spec,
+    validate_variables,
 )
 
 MAX_ERRORS = 20  # errors cap (§5.1)
@@ -79,6 +82,36 @@ class ErrorCode:
     V2_MEASURE_BAD_SOURCE = "V2_MEASURE_BAD_SOURCE"
     V2_MEASURE_BOUNDS = "V2_MEASURE_BOUNDS"
 
+    # M3-A P0: intra-trial variables + content-driven correctness (additive)
+    V2_VAR_BOUNDS = "V2_VAR_BOUNDS"
+    V2_VAR_BAD_NAME = "V2_VAR_BAD_NAME"
+    V2_VAR_SOURCE_CONFLICT = "V2_VAR_SOURCE_CONFLICT"
+    V2_VAR_POOL_UNKNOWN = "V2_VAR_POOL_UNKNOWN"
+    V2_VAR_POOL_EXHAUSTED = "V2_VAR_POOL_EXHAUSTED"
+    V2_VAR_COUNT_BOUNDS = "V2_VAR_COUNT_BOUNDS"
+    V2_VAR_COUNT_COVERAGE = "V2_VAR_COUNT_COVERAGE"
+    V2_VAR_COUNT_UNKNOWN_FACTOR = "V2_VAR_COUNT_UNKNOWN_FACTOR"
+    V2_VAR_REF_UNKNOWN = "V2_VAR_REF_UNKNOWN"
+    V2_VAR_INDEX_BOUNDS = "V2_VAR_INDEX_BOUNDS"
+    V2_VAR_WHEN_SHAPE = "V2_VAR_WHEN_SHAPE"
+    V2_VAR_WHEN_UNKNOWN = "V2_VAR_WHEN_UNKNOWN"
+    V2_VAR_WHEN_COVERAGE = "V2_VAR_WHEN_COVERAGE"
+    V2_RULE_NO_STIMULUS = "V2_RULE_NO_STIMULUS"
+    V2_RULE_CONFLICT = "V2_RULE_CONFLICT"
+    V2_RULE_KIND = "V2_RULE_KIND"
+    V2_RULE_UNKNOWN_OP = "V2_RULE_UNKNOWN_OP"
+    V2_RULE_OPTION_UNKNOWN = "V2_RULE_OPTION_UNKNOWN"
+    V2_RULE_OPERAND_SHAPE = "V2_RULE_OPERAND_SHAPE"
+    V2_RULE_REF_UNKNOWN = "V2_RULE_REF_UNKNOWN"
+    V2_RULE_INDEX_BOUNDS = "V2_RULE_INDEX_BOUNDS"
+
+    # M3-A P1: trial presentation phases (additive)
+    V2_PHASE_BOUNDS = "V2_PHASE_BOUNDS"
+    V2_PHASE_NAME = "V2_PHASE_NAME"
+    V2_PHASE_LINE_BOUNDS = "V2_PHASE_LINE_BOUNDS"
+    V2_PHASE_TEMPLATE_CONFLICT = "V2_PHASE_TEMPLATE_CONFLICT"
+    V2_PHASE_WINDOW_COUNT = "V2_PHASE_WINDOW_COUNT"
+
 
 class WarningCode:
     """Warning-code enumeration (contract §4.4)."""
@@ -104,6 +137,13 @@ class ValidationIssue(BaseModel):
     path: str  # JSON path, e.g. "constraints.ratios[0].ratios" / "factors[1].levels"
     message: str  # human-readable description (includes actual values)
     suggestion: str  # fix suggestion (an action instruction for the LLM)
+
+
+def _issue(error_code: str, path: str, message: str, suggestion: str) -> ValidationIssue:
+    """Build a ValidationIssue (single place where the four fields are assembled)."""
+    return ValidationIssue(
+        error_code=error_code, path=path, message=message, suggestion=suggestion
+    )
 
 
 class ValidationResult(BaseModel):
@@ -431,28 +471,36 @@ def _check_v2_fields(spec: ExperimentSpec, errors: list[ValidationIssue]) -> Non
     """M2-B v2 research-layer checks (D-M2-1 contract §1.5/§1.7).
 
     - schema_version 1 with any v2 field SET (including explicit null) → V2_VERSION_MISMATCH;
-    - schema_version 2: run the v2 semantic validators for each SET feature.
+    - schema_version 2: run the v2 semantic validators for each SET feature
+      (M3-A P0 adds intra-trial variables and content-driven correctness rules).
     Explicit null on schema_version 2 is equivalent to absent (no checks, no dump key).
     """
     v2_set = [name for name in _V2_OPTIONAL_FIELDS if name in spec.model_fields_set]
     if spec.schema_version == 1:
         for name in v2_set:
-            errors.append(
-                ValidationIssue(
-                    error_code=ErrorCode.V2_VERSION_MISMATCH,
-                    path=name,
-                    message=(
-                        f"field {name!r} is a schema_version 2 feature but this spec "
-                        "declares schema_version 1"
-                    ),
-                    suggestion="set schema_version to 2 to use v2 research fields, "
-                    "or remove the field",
-                )
-            )
+            errors.append((
+                _issue(ErrorCode.V2_VERSION_MISMATCH, name,
+                       f"field {name!r} is a schema_version 2 feature but this spec "
+                       "declares schema_version 1",
+                       "set schema_version to 2 to use v2 research fields, or remove the field")
+            ))
+        for ri, response in enumerate(spec.responses):
+            if response.correct_rule is not None:
+                errors.append((
+                    _issue(ErrorCode.V2_VERSION_MISMATCH, f"responses[{ri}].correct_rule",
+                           "correct_rule is a schema_version 2 feature but this spec "
+                           "declares schema_version 1",
+                           "set schema_version to 2 to use content-driven correctness, "
+                           "or remove the field")
+                ))
         return
     raw_issues: list[tuple[str, str, str, str]] = []
     if spec.stimulus_spec is not None:
         raw_issues.extend(validate_stimulus_spec(spec))
+        raw_issues.extend(validate_variables(spec))
+        if spec.stimulus_spec.phases is not None:
+            raw_issues.extend(validate_phases(spec))
+    raw_issues.extend(validate_correct_rules(spec))
     if spec.derived_spec is not None:
         raw_issues.extend(validate_derived_spec(spec))
     if spec.measures is not None:

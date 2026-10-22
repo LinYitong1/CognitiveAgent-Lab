@@ -23,7 +23,7 @@ from src.experiment.generation import (
     generate_trials,
     mutex_pairs,
 )
-from src.experiment.schemas import ExperimentSpec, spec_dump
+from src.experiment.schemas import ExperimentSpec, spec_dump, trial_dump
 
 
 def _now_utc_iso_z() -> str:
@@ -65,7 +65,7 @@ def build_bundle(spec: ExperimentSpec, *, generated_at: str | None = None) -> di
             "effective_weights": weights,
             "allocation": allocation,
         },
-        "trials": [trial.model_dump() for trial in generated.trials],
+        "trials": [trial_dump(trial) for trial in generated.trials],
         "summary": {
             "trial_count": len(generated.trials),
             "blocks": [block.name for block in spec.blocks],

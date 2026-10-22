@@ -47,6 +47,7 @@ from src.experiment.game_render import (
     _split_once,
 )
 from src.experiment.game_schemas import GameSpec
+from src.experiment.phase_player import PHASE_PLAYER_JS, plan_phases
 
 LAYOUT_NAME = "explore-and-encounter"
 
@@ -195,21 +196,29 @@ def build_explore_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[s
                 f"trial {trial.get('index')} has no materialized stimulus.lines — "
                 "the explore layout requires a v2 bundle (G8_STIMULUS_SEMANTICS)"
             )
+        # answer key: content-derived (trial.correct, M3-A P0) wins over correct_from
         correct: dict[str, object] = {}
+        materialized = trial.get("correct")
         for resp in responses:
+            name = cast(str, resp["name"])
+            if isinstance(materialized, dict) and name in materialized:
+                correct[name] = materialized[name]
+                continue
             correct_from = resp["correct_from"]
             if isinstance(correct_from, str) and correct_from in factors:
-                correct[cast(str, resp["name"])] = factors[correct_from]
-        trial_steps.append(
-            {
-                "index": trial["index"],
-                "block": trial["block"],
-                "conditions": dict(factors),
-                "lines": list(lines),
-                "correct": correct,
-                "timing": trial.get("timing"),
-            }
-        )
+                correct[name] = factors[correct_from]
+        trial_step: dict[str, object] = {
+            "index": trial["index"],
+            "block": trial["block"],
+            "conditions": dict(factors),
+            "lines": list(lines),
+            "correct": correct,
+            "timing": trial.get("timing"),
+        }
+        phases = plan_phases(trial)
+        if phases is not None:
+            trial_step["phases"] = phases
+        trial_steps.append(trial_step)
 
     narrative = game_spec.narrative
     intro = narrative.intro if narrative else ""
@@ -295,7 +304,13 @@ def render_explore_html(bundle: dict[str, object], game_spec: GameSpec) -> str:
 
     title = str(cast(dict[str, object], plan["meta"])["title"])
     body_class = f"theme-{game_spec.scene.theme} layout-{LAYOUT_NAME}"
-    return _assemble(html.escape(title, quote=True), body_class, data_script)
+    has_phases = any(
+        isinstance(step, dict) and "phases" in step
+        for step in cast(list[object], plan["trials"])
+    )
+    return _assemble(
+        html.escape(title, quote=True), body_class, data_script, _engine_script(has_phases)
+    )
 
 
 def register_into(
@@ -305,11 +320,15 @@ def register_into(
     register(LAYOUT_NAME, render_explore_html)
 
 
-def _assemble(title: str, body_class: str, data_script: str) -> str:
+def _assemble(title: str, body_class: str, data_script: str, engine_script: str) -> str:
     head, rest = _split_once(_TEMPLATE, "__TITLE__")
     mid, tail = _split_once(rest, "__BODY_CLASS__")
     pre_data, post_data = _split_once(tail, "__DATA__")
-    return head + title + mid + body_class + pre_data + data_script + post_data
+    pre_engine, post_engine = _split_once(post_data, "__ENGINE__\n")
+    return (
+        head + title + mid + body_class + pre_data + data_script
+        + pre_engine + engine_script + post_engine
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -908,6 +927,140 @@ _ENGINE_JS = """\
 # HTML template (static skeleton; same placeholder/split-interleaving discipline)
 # ---------------------------------------------------------------------------
 
+# runEncounter anchor for the M3-A P1 phased addon (must occur exactly once)
+_RUNENCOUNTER_ANCHOR = "  function runEncounter(obj) {\n"
+
+# Phased-encounter addon (injected ONLY when the plan carries phased trials, so
+# unphased explore games keep the exact historical engine bytes): the shared
+# playPhases state machine (phase_player.py — the same timing semantics as the
+# classic renderer) + explore glue. The monotonic cursor, conditions, stimulus
+# content and answer keys stay bundle-driven; exploration order still cannot
+# change them. One response per response_window phase (RT anchored at that
+# phase's onset); keys outside a window are never recorded; responses without
+# a window phase are logged as missed, never skipped and never duplicated.
+_PHASED_ADDON_JS = """\
+  // ---------- M3-A P1: phased encounter playback (present only when trials have phases) ----------
+  function phaseWindowDeadline(timing, phaseDeadline) {
+    var d1 = (timing.stimulus_ms === null || timing.stimulus_ms === undefined)
+      ? null : timing.stimulus_ms;
+    if (d1 !== null && phaseDeadline !== null) { return Math.min(d1, phaseDeadline); }
+    return (d1 !== null) ? d1 : phaseDeadline;
+  }
+  function runPhasedEncounter(obj) {
+    state.mode = "encounter";
+    // pull the NEXT unconsumed trial in index order (monotonic cursor; no skip, no reorder)
+    var trial = TRIALS[state.cursor];
+    state.cursor += 1;
+    var timing = trial.timing || {};
+    var respIdx = 0;
+    var p = Promise.resolve();
+    if (trial.block !== state.lastBlock) {
+      state.lastBlock = trial.block;
+      p = p.then(function () {
+        logMeasurement({ event: "block_start", block: trial.block });
+        return showBriefing(trial.block);
+      });
+    }
+    p = p.then(function () {
+      state.mode = "encounter";
+      stageEl.classList.add("mode-experiment");
+      state.phase = "stimulus";
+    });
+    if (timing.fixation_ms > 0) {
+      p = p.then(function () {
+        clearEl(screenEl);
+        addDiv(screenEl, "trial-banner", "controlled trial — your response is recorded");
+        addDiv(screenEl, "fixation", "+");
+        return sleep(timing.fixation_ms);
+      });
+    }
+    p = p.then(function () {
+      logMeasurement({ event: "trial_start", trial_index: trial.index, block: trial.block,
+                       conditions: trial.conditions });
+    });
+    p = p.then(function () {
+      return playPhases({
+        phases: trial.phases,
+        show: function (ph) {
+          clearEl(screenEl);
+          addDiv(screenEl, "trial-banner", "controlled trial — your response is recorded");
+          addDiv(screenEl, "encounter-object", "you are examining: " + obj.label);
+          var stim = addDiv(screenEl, "stimulus");
+          for (var i = 0; i < ph.lines.length; i++) { addDiv(stim, "stim-line", ph.lines[i]); }
+        },
+        sleep: sleep,
+        waitKey: waitKey,
+        collectWindow: function (ph, phaseDeadline) {
+          var resp = M.responses[respIdx];
+          if (!resp) { return Promise.resolve(); }
+          respIdx += 1;
+          state.phase = "response";
+          addDiv(screenEl, "response-prompt", keyHintText());
+          var deadline = phaseWindowDeadline(timing, phaseDeadline);
+          var onset = performance.now();
+          return collectChoice(resp.name, deadline).then(function (value) {
+            var correct = computeCorrect(trial, resp.name, value);
+            logMeasurement({ event: "response", trial_index: trial.index, block: trial.block,
+                             conditions: trial.conditions, response_name: resp.name,
+                             value: value, correct: correct,
+                             rt_ms: Math.round(performance.now() - onset) });
+            applyOutcome(correct);
+            updateHeader();
+            return showFeedback(correct, value);
+          });
+        }
+      });
+    });
+    p = p.then(function () {
+      state.phase = "isi";
+      // responses left without a window phase: recorded as missed, never valid answers
+      function missOne() {
+        if (respIdx >= M.responses.length) { return Promise.resolve(); }
+        var resp = M.responses[respIdx];
+        respIdx += 1;
+        var correct = computeCorrect(trial, resp.name, null);
+        logMeasurement({ event: "response", trial_index: trial.index, block: trial.block,
+                         conditions: trial.conditions, response_name: resp.name,
+                         value: null, correct: correct, rt_ms: null });
+        applyOutcome(correct);
+        return missOne();
+      }
+      return missOne();
+    });
+    p = p.then(function () {
+      if (timing.isi_ms > 0) {
+        clearEl(screenEl);
+        return sleep(timing.isi_ms);
+      }
+    }).then(function () {
+      state.doneTrials += 1;
+      updateHeader();
+    });
+    return p;
+  }
+"""
+
+
+def _engine_script(phased: bool) -> str:
+    """Engine JS for one rendering: the historical bytes, plus the phased addon
+    (player + dispatch) ONLY when the plan carries phased trials."""
+    if not phased:
+        return _ENGINE_JS
+    if _ENGINE_JS.count(_RUNENCOUNTER_ANCHOR) != 1:
+        raise ValueError("runEncounter anchor not unique in the explore engine")
+    return (
+        PHASE_PLAYER_JS
+        + _ENGINE_JS.replace(
+            _RUNENCOUNTER_ANCHOR,
+            _PHASED_ADDON_JS
+            + _RUNENCOUNTER_ANCHOR
+            + "    if (TRIALS[state.cursor] && TRIALS[state.cursor].phases)"
+            " { return runPhasedEncounter(obj); }\n",
+            1,
+        )
+    )
+
+
 _TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1002,7 +1155,8 @@ footer { margin-top:24px; color:var(--muted); font-size:0.75rem; text-align:cent
 __DATA__
 </script>
 <script>
-""" + _ENGINE_JS + """</script>
+__ENGINE__
+</script>
 </body>
 </html>
 """

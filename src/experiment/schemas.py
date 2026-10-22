@@ -93,6 +93,43 @@ class Constraints(BaseModel):
         return value
 
 
+class _V2Forbid(BaseModel):
+    """Base for v2 models: reject unknown keys (no smuggled content into dumps)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RuleOperandSpec(_V2Forbid):
+    """One side of a content-driven correctness rule (exactly one of the four keys).
+
+    var   -> a value bound by stimulus_spec.variables (index: element position);
+    factor -> the trial's assigned level name of a declared factor;
+    literal -> a constant string.
+    """
+
+    var: str | None = None
+    index: int | None = None
+    literal: str | None = None
+    factor: str | None = None
+
+
+class CorrectRuleSpec(_V2Forbid):
+    """Content-driven correctness: a boolean relation over MATERIALIZED content.
+
+    op is a closed, paradigm-neutral relation over two resolved operands:
+    eq / neq (value equality) and in (membership). The boolean result selects
+    true_option or false_option, which must be declared options of the owning
+    response. Evaluated during materialization -> trial.correct[response_name],
+    so the answer key follows the generated content instead of a condition label.
+    """
+
+    op: str
+    left: RuleOperandSpec
+    right: RuleOperandSpec
+    true_option: str
+    false_option: str
+
+
 class ResponseVar(BaseModel):
     """Response variable (name unique across the spec — V4; options/scale consistency with kind)."""
 
@@ -101,6 +138,8 @@ class ResponseVar(BaseModel):
     options: list[str] = Field(default_factory=list)
     scale: tuple[int, int] | None = None
     correct_from: str | None = None  # when not None, must be a declared factor name (validation layer CORRECT_FROM_UNKNOWN)
+    # v2 research-layer field (schema_version 2 only; None = absent — see spec_dump)
+    correct_rule: CorrectRuleSpec | None = None
 
     @model_validator(mode="after")
     def _kind_fields_consistent(self) -> ResponseVar:
@@ -285,6 +324,9 @@ class Trial(BaseModel):
     stimulus: dict[str, object] = Field(default_factory=dict)
     derived: dict[str, object] = Field(default_factory=dict)
     timing: TimingSpec
+    # v2: content-driven answer key, filled by materialization from correct_rule.
+    # Empty for every spec without a correct_rule (stripped by trial_dump()).
+    correct: dict[str, object] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -298,10 +340,8 @@ class Trial(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class _V2Forbid(BaseModel):
-    """Base for v2 models: reject unknown keys (no smuggled content into dumps)."""
-
-    model_config = ConfigDict(extra="forbid")
+# (_V2Forbid and the correctness-rule models are declared above ResponseVar,
+# which references CorrectRuleSpec; the remaining v2 models follow here.)
 
 
 class StimulusFactorSpec(_V2Forbid):
@@ -317,17 +357,88 @@ class StimulusFactorSpec(_V2Forbid):
     match_line_count: bool = True
 
 
+class VariableCountSpec(_V2Forbid):
+    """Element count bound to a factor level.
+
+    levels must cover every declared level of the named factor: the same
+    variable then holds a different number of elements per condition, so a
+    factor level becomes a real difference in materialized content instead of
+    a label. No field here names any task or paradigm.
+    """
+
+    factor: str
+    levels: dict[str, int]
+
+
+class VariableCopySpec(_V2Forbid):
+    """Reference to an already-bound variable (reuse, no new pool draw).
+
+    index: null -> the whole bound list; an int -> one element by position;
+    "any" -> one element chosen by the trial stream (the only reference form
+    that consumes a draw).
+    """
+
+    var: str
+    index: int | str | None = None
+
+
+class StimulusVariableSpec(_V2Forbid):
+    """One intra-trial variable binding (stimulus_spec.variables).
+
+    Exactly one source: pool (draw `count` elements, optionally excluding
+    values already bound in `exclude`) or copy_from (reuse an earlier variable).
+    `when` is a single {factor: level} guard, so one variable name can be
+    bound differently per condition; guarded entries of the same name must
+    cover every level of that factor (validated: V2_VAR_WHEN_COVERAGE).
+    """
+
+    name: str
+    pool: str | None = None
+    count: int | VariableCountSpec | None = None
+    exclude: list[str] = Field(default_factory=list)
+    copy_from: VariableCopySpec | None = None
+    when: dict[str, str] = Field(default_factory=dict)
+
+
+class StimulusPhaseSpec(_V2Forbid):
+    """One presentation phase inside a trial (generic sequencing primitive).
+
+    Phases play in declaration order. lines carry the same slot syntax as
+    templates ({factor}, {pool:name}, {var:name[i]}). duration_ms: null means
+    the phase advances on input instead of a timer. advance: "auto" = timed
+    advance when duration_ms is set (null duration waits for a keypress);
+    "keypress" = advance on the first keypress, racing the duration when one is
+    set. response_window: the trial's next response is collected during this
+    phase (RT anchors at its onset); outside a window, keys are not recorded.
+    No field here names any task or paradigm.
+    """
+
+    name: str
+    lines: list[str] = Field(min_length=1)
+    duration_ms: int | None = Field(default=None, ge=0)
+    advance: Literal["auto", "keypress"] = "auto"
+    response_window: bool = False
+
+
 class StimulusSpec(_V2Forbid):
     """Paradigm-independent stimulus materialization config.
 
-    Generic vocabulary only: factors, levels, named text pools. Slot syntax
-    inside a line: {<factor_name>} -> the trial's assigned level name;
-    {pool:<pool_name>} -> one line drawn from that pool by the trial's seeded
-    stream. No field here references any task, genre, or paradigm.
+    Generic vocabulary only: factors, levels, named text pools, variables,
+    phases. Slot syntax inside a line: {<factor_name>} -> the trial's assigned
+    level name; {pool:<pool_name>} -> one line drawn from that pool by the
+    trial's seeded stream; {var:<name>} / {var:<name>[i]} -> content already
+    bound by a variable (no draw). No field here references any task, genre, or
+    paradigm.
+
+    Line source is exactly one of: per-factor templates (factors, the M2-B
+    path) or trial phases (phases, the M3-A P1 path) — declaring both is a
+    validation error, never a merge.
     """
 
-    factors: dict[str, StimulusFactorSpec]
+    factors: dict[str, StimulusFactorSpec] = Field(default_factory=dict)
     pools: dict[str, list[str]] = Field(default_factory=dict)
+    variables: list[StimulusVariableSpec] = Field(default_factory=list)
+    phases: list[StimulusPhaseSpec] | None = None
 
 
 class DerivedOpSpec(_V2Forbid):
@@ -386,6 +497,11 @@ def spec_dump(spec: ExperimentSpec) -> dict[str, object]:
       i.e. explicit null is equivalent to absent by design (both mean "no v2 feature");
     - populated → kept, and covered by config_fingerprint / bundle_sha256.
 
+    The same rule applies to the nested v2 fields added by M3-A P0/P1
+    (responses[].correct_rule null, stimulus_spec.variables empty,
+    stimulus_spec.phases null/empty): an unset feature contributes no bytes, so
+    a spec that does not opt in keeps the exact historical serialization.
+
     Consequently a v1-shaped spec (schema_version 1, no v2 fields set) produces a
     dump with zero v2 keys — byte-identical to the historical bare model_dump().
     This is the single projection used at all three serialization call sites
@@ -395,4 +511,30 @@ def spec_dump(spec: ExperimentSpec) -> dict[str, object]:
     for field_name in _V2_OPTIONAL_FIELDS:
         if dump.get(field_name) is None:
             dump.pop(field_name, None)
+    stimulus = dump.get("stimulus_spec")
+    if isinstance(stimulus, dict):
+        if not stimulus.get("variables"):
+            stimulus.pop("variables", None)
+        if not stimulus.get("phases"):
+            stimulus.pop("phases", None)
+    raw_responses = dump.get("responses")
+    if isinstance(raw_responses, list):
+        for response in raw_responses:
+            if isinstance(response, dict) and response.get("correct_rule") is None:
+                response.pop("correct_rule", None)
+    return dump
+
+
+def trial_dump(trial: Trial) -> dict[str, object]:
+    """Canonical projection of one Trial (the single form used for fingerprints and bundles).
+
+    Identical to trial.model_dump() except that an EMPTY content-driven answer key
+    (`correct`, added by M3-A P0) is removed. Absent answer key ⇒ byte-identical to
+    the pre-P0 trial serialization, so every existing fingerprint and golden file is
+    preserved; a spec that opts into correct_rule carries its answer key in
+    trials_fingerprint.
+    """
+    dump = trial.model_dump()
+    if not dump.get("correct"):
+        dump.pop("correct", None)
     return dump

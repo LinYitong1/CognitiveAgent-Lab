@@ -104,8 +104,11 @@ def test_v1_spec_dump_has_no_v2_keys_and_matches_model_dump() -> None:
     """A v1-shaped spec: spec_dump() output equals bare model_dump() minus nothing.
 
     In Phase 1 (no v2 fields on the model yet) this is trivially true; once the
-    v2 fields exist (Phase 2), None-defaulting + projection keeps it true —
-    this test is written to hold in both phases without modification.
+    v2 fields exist (Phase 2), None-defaulting + projection keeps it true.
+
+    M3-A P0 added nested v2 fields (responses[].correct_rule,
+    stimulus_spec.variables); they obey the same "unset contributes no bytes"
+    rule, so "bare minus v2 fields" here means bare minus those nested keys too.
     """
     for tag, base in BASELINES.items():
         spec = ExperimentSpec.model_validate(dict(base["config"]))
@@ -115,6 +118,10 @@ def test_v1_spec_dump_has_no_v2_keys_and_matches_model_dump() -> None:
             assert dump.get(v2_field) is None or v2_field in dump, tag  # populated keeps
             if v2_field in dump:
                 assert dump[v2_field] is not None, tag
+        # the nested v2 fields are removed from the bare dump for the same reason
+        # (an unset v2 feature contributes no bytes to the projection)
+        for response in bare["responses"]:
+            assert response.pop("correct_rule", None) is None, tag
         # v1 spec: no v2 key may survive the projection once the fields exist;
         # and every surviving key must equal the bare dump (projection only removes).
         assert {k: v for k, v in dump.items()} == {

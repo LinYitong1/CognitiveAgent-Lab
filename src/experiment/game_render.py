@@ -25,6 +25,7 @@ from typing import Callable, cast
 
 from src.experiment.canonical import canonical_json
 from src.experiment.game_schemas import GameSpec
+from src.experiment.phase_player import PHASE_PLAYER_JS, plan_phases
 
 MAX_RENDERED_HTML_BYTES = 1_048_576  # rendered-output guard (§11.8, same order as export)
 
@@ -126,24 +127,33 @@ def build_run_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[str, 
             [name, factors[name]] for name in factor_order if name in factors
         ]
         stimulus = trial.get("stimulus")
-        if isinstance(stimulus, dict):
-            display.extend([key, stimulus[key]] for key in sorted(stimulus))
-        # Correct answers: only from the Bundle (trial.factors[correct_from], §11.2)
+        phases = plan_phases(trial)
+        if phases is None:
+            if isinstance(stimulus, dict):
+                display.extend([key, stimulus[key]] for key in sorted(stimulus))
+        # Correct answers: only from the Bundle — a content-derived answer key
+        # (trial.correct, M3-A P0) wins, otherwise trial.factors[correct_from] (§11.2)
         correct: dict[str, object] = {}
+        materialized = trial.get("correct")
         for resp in responses:
+            name = cast(str, resp["name"])
+            if isinstance(materialized, dict) and name in materialized:
+                correct[name] = materialized[name]
+                continue
             correct_from = resp["correct_from"]
             if isinstance(correct_from, str) and correct_from in factors:
-                correct[cast(str, resp["name"])] = factors[correct_from]
-        steps.append(
-            {
-                "type": "trial",
-                "index": trial["index"],
-                "block": block,
-                "display": display,
-                "timing": trial.get("timing"),
-                "correct": correct,
-            }
-        )
+                correct[name] = factors[correct_from]
+        trial_step: dict[str, object] = {
+            "type": "trial",
+            "index": trial["index"],
+            "block": block,
+            "display": display,
+            "timing": trial.get("timing"),
+            "correct": correct,
+        }
+        if phases is not None:
+            trial_step["phases"] = phases
+        steps.append(trial_step)
 
     # the end step always exists (the event log must stay exportable); the summary flag controls the stats section (§11.2)
     steps.append({"type": "end", "summary": game_spec.flow.end_screen == "summary"})
@@ -231,7 +241,11 @@ def render_game_html(bundle: dict[str, object], game_spec: GameSpec) -> str:
 
     title = str(cast(dict[str, object], plan["meta"])["title"])
     body_class = f"theme-{game_spec.scene.theme} layout-{game_spec.scene.layout}"
-    return _assemble(html.escape(title, quote=True), body_class, data_script)
+    has_phases = any(
+        isinstance(step, dict) and "phases" in step
+        for step in cast(list[object], plan["steps"])
+    )
+    return _assemble(html.escape(title, quote=True), body_class, data_script, _engine_script(has_phases))
 
 
 def _split_once(template: str, placeholder: str) -> tuple[str, str]:
@@ -242,11 +256,174 @@ def _split_once(template: str, placeholder: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _assemble(title: str, body_class: str, data_script: str) -> str:
+# runTrial anchor for the M3-A P1 phased addon (must occur exactly once)
+_RUNTRIAL_ANCHOR = "  function runTrial(step) {\n"
+
+# Phased-trial addon (injected ONLY when the plan carries phased trials, so
+# every unphased game keeps the exact historical engine bytes / golden HTML):
+# shared playPhases state machine (phase_player.py) + engine glue. One response
+# is collected per response_window phase (RT anchored at that phase's onset);
+# keys outside a window are never recorded; responses without a window phase
+# are logged as missed (value null), never skipped and never duplicated.
+_PHASED_ADDON_JS = """\
+  // ---------- M3-A P1: phased trial playback (present only when trials have phases) ----------
+  function phaseWindowDeadline(timing, phaseDeadline) {
+    var d1 = (timing.stimulus_ms === null || timing.stimulus_ms === undefined)
+      ? null : timing.stimulus_ms;
+    if (d1 !== null && phaseDeadline !== null) { return Math.min(d1, phaseDeadline); }
+    return (d1 !== null) ? d1 : phaseDeadline;
+  }
+  function phasedCollectChoice(resp, deadline) {
+    var binding = (M.bindings && M.bindings[resp.name]) || {};
+    var prompt = addDiv(screenEl, "response-prompt");
+    addDiv(prompt, "hint", hintForResponse(resp));
+    return waitKey(function (key) {
+      return Object.prototype.hasOwnProperty.call(binding, key);
+    }, deadline).then(function (k) {
+      if (k === null) { return null; }
+      return binding[k];
+    });
+  }
+  function phasedCollectInput(resp, deadline) {
+    var wrap = addDiv(screenEl, "response-prompt");
+    addDiv(wrap, "hint", hintForResponse(resp));
+    var input = document.createElement("input");
+    input.type = "text";
+    input.className = "text-input";
+    input.autocomplete = "off";
+    wrap.appendChild(input);
+    input.focus();
+    return new Promise(function (resolve) {
+      var settled = false;
+      function finish(v) { if (!settled) { settled = true; resolve(v); } }
+      input.addEventListener("keydown", function (ev) {
+        ev.stopPropagation();
+        if (ev.key !== "Enter") { return; }
+        ev.preventDefault();
+        var raw = input.value;
+        if (resp.kind === "rating" && resp.scale) {
+          var n = Number(raw);
+          if (raw.trim() === "" || !Number.isInteger(n) || n < resp.scale[0] || n > resp.scale[1]) {
+            addDiv(wrap, "warn", "enter an integer between " + resp.scale[0] + " and " + resp.scale[1]);
+            return;
+          }
+          finish(n);
+        } else {
+          finish(raw);
+        }
+      });
+      if (deadline !== null && deadline !== undefined) {
+        setTimeout(function () { finish(null); }, deadline);
+      }
+    });
+  }
+  function runPhasedTrial(step) {
+    var timing = step.timing || {};
+    var respIdx = 0;
+    var p = Promise.resolve();
+    if (timing.fixation_ms > 0) {
+      p = p.then(function () {
+        clearEl(screenEl);
+        addDiv(screenEl, "fixation", "+");
+        return sleep(timing.fixation_ms);
+      });
+    }
+    p = p.then(function () {
+      logEvent({ event: "trial_start", trial_index: step.index, block: step.block,
+                 conditions: conditionsOf(step) });
+    });
+    p = p.then(function () {
+      return playPhases({
+        phases: step.phases,
+        show: function (ph) {
+          clearEl(screenEl);
+          var stim = addDiv(screenEl, "stimulus");
+          for (var i = 0; i < ph.lines.length; i++) { addDiv(stim, "stim-line", ph.lines[i]); }
+        },
+        sleep: sleep,
+        waitKey: waitKey,
+        collectWindow: function (ph, phaseDeadline) {
+          var resp = M.responses[respIdx];
+          if (!resp) { return Promise.resolve(); }
+          var deadline = phaseWindowDeadline(timing, phaseDeadline);
+          var onset = performance.now();
+          var collectP = (resp.kind === "choice")
+            ? phasedCollectChoice(resp, deadline)
+            : phasedCollectInput(resp, deadline);
+          return collectP.then(function (value) {
+            respIdx += 1;
+            var correct = computeCorrect(resp, step, value);
+            logEvent({ event: "response", trial_index: step.index, block: step.block,
+                       conditions: conditionsOf(step), response_name: resp.name,
+                       value: value, correct: correct,
+                       rt_ms: Math.round(performance.now() - onset) });
+            applyOutcome(correct);
+            updateHeader();
+            return showFeedback(correct, value);
+          });
+        }
+      });
+    });
+    p = p.then(function () {
+      // responses left without a window phase: recorded as missed, never valid answers
+      function missOne() {
+        if (respIdx >= M.responses.length) { return Promise.resolve(); }
+        var resp = M.responses[respIdx];
+        respIdx += 1;
+        var correct = computeCorrect(resp, step, null);
+        logEvent({ event: "response", trial_index: step.index, block: step.block,
+                   conditions: conditionsOf(step), response_name: resp.name,
+                   value: null, correct: correct, rt_ms: null });
+        applyOutcome(correct);
+        return missOne();
+      }
+      return missOne();
+    });
+    p = p.then(function () {
+      if (timing.isi_ms > 0) {
+        clearEl(screenEl);
+        return sleep(timing.isi_ms);
+      }
+    }).then(function () {
+      doneTrials += 1;
+      updateHeader();
+    });
+    return p;
+  }
+"""
+
+
+def _engine_script(phased: bool) -> str:
+    """Engine JS for one rendering: the historical bytes, plus the phased addon
+    (player + dispatch) ONLY when the plan carries phased trials.
+
+    Unphased output is byte-identical to the pre-P1 engine (golden gate).
+    """
+    if not phased:
+        return _ENGINE_JS
+    if _ENGINE_JS.count(_RUNTRIAL_ANCHOR) != 1:
+        raise ValueError("runTrial anchor not unique in the classic engine")
+    return (
+        PHASE_PLAYER_JS
+        + _ENGINE_JS.replace(
+            _RUNTRIAL_ANCHOR,
+            _PHASED_ADDON_JS
+            + _RUNTRIAL_ANCHOR
+            + "    if (step.phases) { return runPhasedTrial(step); }\n",
+            1,
+        )
+    )
+
+
+def _assemble(title: str, body_class: str, data_script: str, engine_script: str) -> str:
     head, rest = _split_once(_TEMPLATE, "__TITLE__")
     mid, tail = _split_once(rest, "__BODY_CLASS__")
     pre_data, post_data = _split_once(tail, "__DATA__")
-    return head + title + mid + body_class + pre_data + data_script + post_data
+    pre_engine, post_engine = _split_once(post_data, "__ENGINE__\n")
+    return (
+        head + title + mid + body_class + pre_data + data_script
+        + pre_engine + engine_script + post_engine
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -767,7 +944,8 @@ footer { margin-top:24px; color:var(--muted); font-size:0.75rem; text-align:cent
 __DATA__
 </script>
 <script>
-""" + _ENGINE_JS + """</script>
+__ENGINE__
+</script>
 </body>
 </html>
 """
