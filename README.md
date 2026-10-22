@@ -2,13 +2,18 @@
 
 A deterministic pipeline that turns a structured experiment specification into a
 reproducible trial sequence and a **single-file, browser-playable HTML game** — with
-the experiment logic sealed off from the presentation layer.
+the experiment logic sealed off from the presentation layer. Two game shapes are
+supported: a classic sequential layout and an **explorable spatial game**
+(GameSpec v2: rooms, objects, narrative — where examining marked objects triggers
+controlled trials).
 
 It also ships a small single-loop agent runtime (tool registry + agent loop) that
-drives this pipeline. **Important:** that agent path is currently validated only with
-a scripted fake LLM; real-LLM end-to-end reliability is not yet established
-([details below](#status-what-is-validated-what-is-not)). Today, the dependable core
-of this project is the deterministic experiment→game pipeline, not the agent.
+drives this pipeline. The agent path is validated end-to-end with a scripted fake
+LLM in the test suite, and — as of October 2026 — with one **real Gemini run (T5)**
+that autonomously generated, validated and rendered a complete experiment game from
+a natural-language task. A second, harder real-Gemini task (an explorable
+working-memory game) did not complete within its API budget; see
+[status](#status-what-is-validated-what-is-not).
 
 > **Developer preview** — an experiment-generation scaffold with unusual
 > reproducibility discipline, not a general agent framework and not a
@@ -19,8 +24,17 @@ ExperimentSpec (JSON, validated)
   → deterministic trial sequence (same spec + seed → byte-identical trials, always)
   → ExperimentBundle (JSON artifact with SHA-256 integrity fingerprints)
   → GameSpec (presentation-only description, validated against the bundle)
-  → single-file HTML game (opens via file://; keyboard input; embedded event log)
+  → single-file HTML game (classic or explorable; keyboard input; embedded event log)
 ```
+
+The v2 research layer adds three paradigm-neutral capabilities on the measurement
+side: **intra-trial variables** (factor levels can bind different amounts of
+generated content — a real content difference, not a label), **content references**
+(later stimulus lines can reuse earlier generated content without re-drawing), and
+**content-driven correctness** (the answer key is computed from the materialized
+stimulus relationship, not from condition names). Trials can also be split into
+ordered **presentation phases** (e.g. show → hold → probe) where the response
+window opens only on designated phases.
 
 ## What this is — and is not
 
@@ -28,19 +42,30 @@ ExperimentSpec (JSON, validated)
 
 - A deterministic generator for game-based cognitive experiments: you describe
   factors, levels, blocks, responses and timing; it produces a reproducible trial
-  sequence and a playable single-file HTML game.
+  sequence and a playable single-file HTML game — classic sequential or
+  explorable-spatial (GameSpec v2).
 - A scaffold that keeps the game/presentation layer from touching experiment
   logic (trials, conditions, correct answers) — verified, not just promised.
+- A research layer for generic experiment content: intra-trial variables,
+  references to earlier generated content, content-driven answer keys, and
+  multi-phase trial presentation with per-phase response windows. All of it is
+  composed from paradigm-neutral primitives — the engine contains no
+  N-back/DMTS/working-memory vocabulary.
 - A single-loop agent runtime with a tool registry, which the deterministic
   pipeline is wired into as tools — exercised end-to-end with a scripted fake
-  LLM in tests and the `demo` command.
+  LLM in tests, plus one successful real-Gemini end-to-end run (T5).
 
 **This is not:**
 
-- A general-purpose AI agent framework (one loop, eight tools, no planning
+- A general-purpose AI agent framework (one loop, a fixed tool set, no planning
   subsystem, no memory, no multi-agent anything).
-- A validated natural-language assistant: "describe an experiment in English and
-  the agent designs it" does **not** reliably work yet — see the PA-14 note.
+- A validated natural-language assistant: one real-LLM task (T5) fully passed;
+  a harder one (T2, explorable working-memory game) did not complete — see the
+  status section.
+- A claim that all experimental paradigms are supported: the engine offers
+  generic composition primitives; whether a composed design is *scientifically
+  valid* (real memory load, meaningful intervals, no cue leakage) is a
+  researcher's judgement the engine cannot make.
 - A security mechanism: the "experiment/presentation separation" below is about
   design integrity (the game layer cannot silently redefine your experiment),
   not about defending against a hostile user who edits the HTML file.
@@ -49,29 +74,58 @@ ExperimentSpec (JSON, validated)
 
 ## Status: what is validated, what is not
 
-**Validated** (automated by the 231-test suite; deterministic; no LLM keys required):
+**Validated** (automated by the 381-test suite; deterministic; no LLM keys required):
 
 - The full ExperimentSpec → trials → ExperimentBundle pipeline: byte-reproducible
   for the same spec+seed, with dual SHA-256 fingerprints and an independent
   verification CLI that recomputes them without the generator.
-- The GameSpec → validate → render chain: single-file HTML, byte-identical
-  re-renders, fingerprint startup check inside the HTML, schema-level separation
-  of experiment semantics from presentation.
+- The GameSpec → validate → render chain for both layouts: single-file HTML,
+  byte-identical re-renders, fingerprint startup check inside the HTML,
+  schema-level separation of experiment semantics from presentation.
+- GameSpec v2 explorable games: rooms/objects/narrative validated (G8 rules),
+  monotonic trial cursor — exploration order provably cannot change conditions,
+  stimuli, trial count or correct answers.
+- Intra-trial variables, content references and content-driven answer keys:
+  factor levels produce genuinely different materialized content; the answer
+  key follows the materialized stimulus relationship (verified by recomputing
+  it from the rendered text in tests).
+- Multi-phase trials: phase order, timed/keyed advance, response-window gating
+  (keypresses outside a window are never recorded), RT anchored at the window
+  phase onset, no skipped or double-counted responses — runtime-verified for
+  both renderers under node with a DOM stub.
+- Backward compatibility: v1 specs, golden HTML files and all pre-v2
+  fingerprints are byte-identical after every extension (enforced by tests).
 - The agent workflow shape (tool call order, error iteration, verification)
   driven by a scripted fake LLM — including that tampered or missing artifacts
   fail loudly instead of passing silently.
 - Tool-security boundaries (calc AST whitelist, http_request SSRF chain,
   file_write sandbox).
 
-**Not validated:**
+**Validated with a real LLM (once, bounded):**
 
-- **Real-LLM end-to-end (known issue PA-14).** On the tested stack
-  (qwen2.5:7b + Ollama 0.40.6) tool calls are silently dropped. Every agent
-  workflow in the test suite runs against FakeLLM; a real LLM has been
-  exercised only against the three basic M1 tools. The LLM interface
-  (`LLMClientProtocol`) is swappable, and real-LLM integration is deferred.
-  In short: **the 231 tests prove the scaffold is reproducible; they do not
-  prove a real LLM can drive it.**
+- **T5 (real Gemini, October 2026)**: from a natural-language task, the agent
+  autonomously authored an ExperimentSpec, validated and exported the bundle,
+  wrote a valid GameSpec, and rendered a playable HTML game — with
+  self-correction loops on validation errors. All artifacts verified.
+  This is a single successful run, not a reliability claim.
+
+**Not validated / incomplete:**
+
+- **T2 (real Gemini): incomplete.** Generating an explorable *working-memory*
+  game from a natural-language brief stopped at the API budget boundary
+  (≈2–3 tool calls short of rendering). The deeper finding was scientific, not
+  technical: the engine at that time could only express a *nominal* memory task
+  (condition labels without real sequence content). The P0/P1 research-layer
+  extensions (variables, references, content-driven correctness, phases) were
+  built specifically to close that gap — but a real-LLM re-run has not yet
+  been performed.
+- **Scientific validity is not automated.** The engine proves the answer key
+  follows the materialized content; it cannot prove the content instantiates
+  the intended cognitive process (load calibration, retention intervals, cue
+  leakage, counterbalancing remain researcher responsibilities).
+- Real-LLM reliability beyond the two bounded runs above (qwen2.5:7b +
+  Ollama tool-calls remain broken, known issue PA-14); every agent workflow in
+  the test suite runs against FakeLLM.
 
 ## Quick start (no LLM keys required)
 
@@ -135,8 +189,8 @@ cognitive-agent demo
 cognitive-agent demo --output out/my-first-experiment
 
 # Run a natural-language task with your configured real LLM provider
-# (experimental: real-LLM end-to-end reliability is not yet validated —
-#  see "Status" above)
+# (experimental: one bounded Gemini run passed end-to-end; general real-LLM
+#  reliability is not established — see "Status" above)
 cognitive-agent run "design a 2x2 attention experiment with 80 trials and render a playable game"
 
 # Confine the run's generated files to a directory
@@ -236,7 +290,10 @@ src/
 │                  + validate_experiment / generate_trials / export_experiment
 │                  + validate_game / render_game
 ├── experiment/    Deterministic experiment engine: schemas / validation / generation / export /
-│                  verify (generator-free independent verification CLI) / game_schemas / game_render
+│                  verify (generator-free independent verification CLI) / game_schemas /
+│                  game_render (classic) / explore_render (v2 explorable) /
+│                  stimulus (v2 materialization: variables, phases, correctness rules) /
+│                  phase_player (shared phased-playback JS for both renderers)
 ├── models/        Pydantic models (LLM, tool specs, events, results)
 └── api/           FastAPI + SSE event stream
 ```
@@ -266,17 +323,20 @@ Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md)
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest            # full test suite (231 tests, no keys needed)
+.venv/bin/python -m pytest            # full test suite (381 tests, no keys needed)
 .venv/bin/python -m pyright src/      # static typing (0 errors)
 .venv/bin/python -m scripts.check_layers  # layering dependency check
 scripts/check.sh                      # CI gate (all of the above + secret scan + compile check)
 ```
 
 What the suite covers: deterministic generation, schema boundaries,
-tool-security rules, golden files, and the FakeLLM-driven agent workflow.
-It is reproducibility evidence for the scaffold — read it alongside
-the [status section](#status-what-is-validated-what-is-not), not as evidence
-of real-LLM capability.
+tool-security rules, golden files, the FakeLLM-driven agent workflow, and —
+since the v2 research layer — variable binding, content-driven correctness,
+multi-phase playback (node runtime tests for both renderers) and byte-level
+backward compatibility of all pre-v2 output. It is reproducibility evidence
+for the scaffold — read it alongside the
+[status section](#status-what-is-validated-what-is-not), not as evidence of
+real-LLM capability beyond the bounded runs described there.
 
 Determinism, precisely scoped: rerunning with the same spec+seed produces the
 **identical trial sequence, identical config/trials/bundle fingerprints, and
@@ -294,19 +354,26 @@ end summary, event-log download, tamper resistance):
 
 ## Known limitations
 
-1. **Real-LLM end-to-end not yet passing (known issue PA-14)**: on qwen2.5:7b + Ollama 0.40.6,
-   tool calls are silently dropped (see `docs/handoff/ollama-toolcall-diagnosis-report.md`);
-   the current acceptance gate is FakeLLM + pytest, real-LLM integration is deferred, and the
-   LLM interface (`LLMClientProtocol`) stays swappable.
-2. **Timing not validated**: browser `setTimeout` scheduling is approximate — **not for formal
-   experimental data collection**.
-3. **Limited game interaction types**: the MVP supports keyboard only (choice keys / text /
-   rating input), no pointer/touch/audio; three feedback-style enums; multi-response trials
-   do not redraw the stimulus.
-4. **Event log is not force-persisted**: it lives in page memory with a manual download on the
-   end screen.
-5. Browser-automation playability testing (Playwright-style) is deferred (decision D2: the
-   manual checklist stands in).
+1. **Real-LLM coverage is thin**: one bounded Gemini run (T5) passed end-to-end; the harder T2
+   task stopped at the API budget boundary and has not been re-run since the P0/P1 engine
+   extensions. On qwen2.5:7b + Ollama tool calls are silently dropped (known issue PA-14,
+   `docs/handoff/ollama-toolcall-diagnosis-report.md`). The default acceptance gate remains
+   FakeLLM + pytest; `LLMClientProtocol` stays swappable.
+2. **Scientific validity needs researcher review**: the engine verifies structural
+   reproducibility and content-consistent scoring, but whether a composed design measures
+   what it claims (memory load, retention intervals, cue leakage, counterbalancing) is
+   outside what it can check. T2's "nominal working-memory task" failure is the cautionary
+   example.
+3. **Timing not validated**: browser `setTimeout` scheduling is approximate — **not for formal
+   experimental data collection**. This applies to phase durations too; the phased playback
+   is gameplay-grade sequencing, not millisecond-accurate stimulus timing.
+4. **Limited game interaction types**: the MVP supports keyboard only (choice keys / text /
+   rating input), no pointer/touch/audio in the classic layout (the explore layout adds
+   click-to-act); three feedback-style enums.
+5. **Event log is not force-persisted**: it lives in page memory with a manual download on the
+   end screen. Phase-onset timestamps for offline RT auditing are not yet emitted (planned).
+6. Browser-automation playability testing (Playwright-style) is deferred (decision D2: the
+   manual checklist stands in; node DOM-stub runtime tests cover the engine logic).
 
 ## Documentation
 
