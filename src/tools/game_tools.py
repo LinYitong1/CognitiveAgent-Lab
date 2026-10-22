@@ -6,7 +6,7 @@ BLOCKED: prefix + build_*(settings) -> ToolSpec factories.
 Two-tier error contract (inheriting the Phase A §5.4 semantics):
 - tool-level failure (non-dict, size guard, sandbox refusal, unloadable bundle, oversized HTML) → ok=False;
 - domain-level failure (GameSpec rules G1~G6) → always ok=True + valid:false + rendered:false
-  (B0 validate_game's result passed through verbatim — no rule duplication; nothing rendered, nothing written).
+  (B0 validate_game's result passed through verbatim - no rule duplication; nothing rendered, nothing written).
 
 Boundary (§10/§11): the game tools treat the ExperimentBundle as read-only; render_game's only write
 is placing the rendered HTML inside the data/ sandbox (five-step rule steps 1~3+5; step 4 is the HTML size guard).
@@ -40,7 +40,32 @@ class _GameBlocked(Exception):
 class ValidateGameInput(BaseModel):
     """validate_game arguments (contract §10)."""
 
-    game_config: dict[str, object]  # the GameSpec JSON object (generated inline by the LLM)
+    game_config: dict[str, object] = Field(  # the GameSpec JSON object (generated inline by the LLM)
+        description=(
+            "The GameSpec JSON object itself, no wrapper. schema_version 1 keys: "
+            "game{name,version},experiment_ref{name,version,seed,config_fingerprint,"
+            "trials_fingerprint,bundle_sha256},scene{title,instructions,layout,theme,assets},"
+            "input{modalities,bindings[{response_name,keys}]},"
+            "feedback{on_response,duration_ms},flow{ready_screen,block_breaks,end_screen},"
+            "gamification{score,progress_bar,streak_bonus}. "
+            "schema_version 2 adds OPTIONAL sections world, narrative, mechanics, mapping "
+            "(all default null; absent == null): "
+            "world{start_room,rooms{<room_id>:{title,description,exits{<room_id>:<label>},"
+            "objects[{object_id,label,inspect_text,role:'flavour'|'encounter'}]}}} - "
+            "max 8 rooms, 6 objects/room, every room reachable from start_room. "
+            "narrative{intro,block_briefings{<block>:text},ending_bands[{min_accuracy,text}]}. "
+            "mechanics{layout:'explore-and-encounter',trial_trigger:'explore-encounter',"
+            "inspect_objects}. mapping{trial_trigger:'explore-encounter',"
+            "encounter_objects[object_id...],response_bindings[{response_name,keys}],"
+            "creative_freedom[],controlled_invariants[]} - encounter object ids must "
+            "reference role=encounter objects (each listed exactly once; count >= trial "
+            "count); creative_freedom values from theme,room_labels,object_labels,"
+            "narrative_text,feedback_style; controlled_invariants values from trial_order,"
+            "conditions,stimulus_content,correct_answers,timing. keys = single lowercase "
+            "letters. Trials are consumed in bundle order (monotonic cursor): exploration "
+            "order never changes conditions, stimuli, trial count, or correct answers."
+        )
+    )
     bundle_path: str = Field(min_length=1)  # ExperimentBundle JSON path relative to the data/ sandbox root
     previous_errors: list[str] = Field(default_factory=list)  # error_code:path fingerprints of previous rounds
 
@@ -135,14 +160,14 @@ def build_validate_game_spec(settings: Settings) -> ToolSpec:
         description=(
             "Validate GameSpec JSON (presentation layer) against an ExperimentBundle "
             "already exported in data/ sandbox. game_config must be the GameSpec object "
-            "itself, no wrapper. Top keys: schema_version(=1),game{name,version},"
-            "experiment_ref{name,version,seed,config_fingerprint,trials_fingerprint,"
-            "bundle_sha256},scene{title,instructions,layout,theme,assets},"
-            "input{modalities,bindings[{response_name,keys}]},"
-            "feedback{on_response,duration_ms},flow{ready_screen,block_breaks,end_screen},"
-            "gamification{score,progress_bar,streak_bonus}. Copy experiment_ref values "
-            "exactly from the bundle file. bundle_path is the bundle file path inside "
-            "data/ sandbox."
+            "itself, no wrapper; see the game_config field description for the full "
+            "schema of both schema_version 1 (classic single-screen) and schema_version 2 "
+            "(explorable rooms: optional world, narrative, mechanics, mapping sections). "
+            "Copy experiment_ref values exactly from the bundle file. bundle_path is the "
+            "bundle file path inside data/ sandbox. For explorable v2 games: layout "
+            "explore-and-encounter, trial_trigger explore-encounter, one encounter object "
+            "per trial, response bindings keyed by single lowercase letters; exploration "
+            "never changes conditions, stimuli, trial count, or correct answers."
         ),
         input_model=ValidateGameInput,
         idempotency="idempotent",
