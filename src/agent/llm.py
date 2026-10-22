@@ -51,6 +51,25 @@ class LLMClient:
             tools=cast(Any, tools),
         )
         choice = response.choices[0]
+        usage_obj = getattr(response, "usage", None)
+        usage: dict[str, int] | None = None
+        if usage_obj is not None:
+            usage = {
+                "prompt_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0),
+                "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
+            }
+            # provider detail fields when present (observability only)
+            comp_details = getattr(usage_obj, "completion_tokens_details", None)
+            if comp_details is not None:
+                reasoning = getattr(comp_details, "reasoning_tokens", None)
+                if reasoning is not None:
+                    usage["reasoning_tokens"] = int(reasoning)
+            prompt_details = getattr(usage_obj, "prompt_tokens_details", None)
+            if prompt_details is not None:
+                cached = getattr(prompt_details, "cached_tokens", None)
+                if cached is not None:
+                    usage["cached_tokens"] = int(cached)
         tool_calls: list[ToolCallRequest] = []
         for native in choice.message.tool_calls or []:
             if native.type != "function" or native.function is None:
@@ -59,15 +78,22 @@ class LLMClient:
                 arguments = json.loads(native.function.arguments or "{}")
             except json.JSONDecodeError as exc:
                 raise LLMProtocolError(f"invalid tool arguments JSON: {exc}") from exc
+            # capture opaque provider extensions (e.g. Gemini 3.x thought_signature in
+            # extra_content.google) so the loop can round-trip them in the history;
+            # providers without such fields yield None and behave exactly as before
+            extra = getattr(native, "model_extra", None) or {}
+            provider_extra = cast("dict[str, object] | None", extra.get("extra_content"))
             tool_calls.append(
                 ToolCallRequest(
                     remote_id=native.id,
                     tool_name=native.function.name,
                     arguments=arguments,
+                    provider_extra=provider_extra,
                 )
             )
         return LLMResponse(
             content=choice.message.content or "",
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
+            usage=usage,
         )

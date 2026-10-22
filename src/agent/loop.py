@@ -98,8 +98,9 @@ class AgentLoop:
                 result_text = response.content
                 break
 
-            native_calls: list[dict[str, Any]] = [
-                {
+            native_calls: list[dict[str, Any]] = []
+            for call in response.tool_calls:
+                native: dict[str, Any] = {
                     "id": call.remote_id,
                     "type": "function",
                     "function": {
@@ -107,8 +108,11 @@ class AgentLoop:
                         "arguments": json.dumps(call.arguments, ensure_ascii=False),
                     },
                 }
-                for call in response.tool_calls
-            ]
+                if call.provider_extra is not None:
+                    # opaque provider extension (e.g. Gemini 3.x thought_signature) —
+                    # echoed back verbatim; providers without it stay byte-identical
+                    native["extra_content"] = call.provider_extra
+                native_calls.append(native)
             messages.append(
                 {"role": "assistant", "content": response.content, "tool_calls": native_calls}
             )
