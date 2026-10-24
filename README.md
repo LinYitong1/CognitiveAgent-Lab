@@ -15,8 +15,8 @@ a natural-language task. A second, harder real-Gemini task (an explorable
 working-memory game) did not complete within its API budget; see
 [status](#status-what-is-validated-what-is-not).
 
-> **Developer preview** — an experiment-generation scaffold with unusual
-> reproducibility discipline, not a general agent framework and not a
+> **Developer preview** — a deterministic, byte-reproducible
+> experiment-generation scaffold, not a general agent framework and not a
 > research-grade data-collection tool.
 
 ```
