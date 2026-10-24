@@ -131,7 +131,16 @@ class CorrectRuleSpec(_V2Forbid):
 
 
 class ResponseVar(BaseModel):
-    """Response variable (name unique across the spec — V4; options/scale consistency with kind)."""
+    """Response variable (name unique across the spec — V4; options/scale consistency with kind).
+
+    withhold_option (schema_version 2 research-layer field, default None): declares
+    that NO response (deadline expiry) is a meaningful answer for this response and
+    names the ANSWER-KEY value representing it. The runtime event log keeps
+    value=null for a withheld response (behavior is recorded, never substituted);
+    only the scoring rule treats null as an answer — null is correct exactly when
+    the expected key equals withhold_option. Must not collide with options; None =
+    absent (stripped by spec_dump, so unset features contribute no bytes).
+    """
 
     name: str = Field(min_length=1)
     kind: Literal["choice", "text", "rating"]
@@ -140,6 +149,8 @@ class ResponseVar(BaseModel):
     correct_from: str | None = None  # when not None, must be a declared factor name (validation layer CORRECT_FROM_UNKNOWN)
     # v2 research-layer field (schema_version 2 only; None = absent — see spec_dump)
     correct_rule: CorrectRuleSpec | None = None
+    # v2 research-layer field (schema_version 2 only; None = absent — see spec_dump)
+    withhold_option: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def _kind_fields_consistent(self) -> ResponseVar:
@@ -159,21 +170,32 @@ class ResponseVar(BaseModel):
         return self
 
 
+class TimingSpec(BaseModel):
+    """Timing parameters (declared at spec level, materialized per trial).
+
+    Declared before BlockSpec: the block-level timing override (a schema_version 2
+    research-layer feature) references this model in its annotation.
+    """
+
+    fixation_ms: int = Field(default=500, ge=0)
+    stimulus_ms: int | None = Field(default=None, ge=0)  # None = until response
+    isi_ms: int = Field(default=1000, ge=0)
+
+
 class BlockSpec(BaseModel):
-    """Experiment block (name unique across the spec — V3; the block-derivation key relies on uniqueness)."""
+    """Experiment block (name unique across the spec — V3; the block-derivation key relies on uniqueness).
+
+    timing (schema_version 2 research-layer field, default None): a WHOLE-OBJECT
+    replacement of the spec-level timing for this block's trials — block-level
+    override only, never a per-condition mechanism. None = absent: spec_dump()
+    strips it so a spec that does not opt in keeps the historical serialization.
+    """
 
     name: str = Field(min_length=1)
     trial_count: int = Field(gt=0, le=MAX_BLOCK_TRIAL_COUNT)
     factor_filter: dict[str, list[str]] = Field(default_factory=dict)
     shuffle_within: bool = True
-
-
-class TimingSpec(BaseModel):
-    """Timing parameters (declared at spec level, materialized per trial)."""
-
-    fixation_ms: int = Field(default=500, ge=0)
-    stimulus_ms: int | None = Field(default=None, ge=0)  # None = until response
-    isi_ms: int = Field(default=1000, ge=0)
+    timing: "TimingSpec | None" = None
 
 
 class ExperimentSpec(BaseModel):
@@ -499,8 +521,10 @@ def spec_dump(spec: ExperimentSpec) -> dict[str, object]:
 
     The same rule applies to the nested v2 fields added by M3-A P0/P1
     (responses[].correct_rule null, stimulus_spec.variables empty,
-    stimulus_spec.phases null/empty): an unset feature contributes no bytes, so
-    a spec that does not opt in keeps the exact historical serialization.
+    stimulus_spec.phases null/empty) and by the expressiveness Stage 1
+    (responses[].withhold_option null, blocks[].timing null): an unset
+    feature contributes no bytes, so a spec that does not opt in keeps the
+    exact historical serialization.
 
     Consequently a v1-shaped spec (schema_version 1, no v2 fields set) produces a
     dump with zero v2 keys — byte-identical to the historical bare model_dump().
@@ -517,11 +541,20 @@ def spec_dump(spec: ExperimentSpec) -> dict[str, object]:
             stimulus.pop("variables", None)
         if not stimulus.get("phases"):
             stimulus.pop("phases", None)
+    raw_blocks = dump.get("blocks")
+    if isinstance(raw_blocks, list):
+        for block in raw_blocks:
+            if isinstance(block, dict) and block.get("timing") is None:
+                block.pop("timing", None)
     raw_responses = dump.get("responses")
     if isinstance(raw_responses, list):
         for response in raw_responses:
-            if isinstance(response, dict) and response.get("correct_rule") is None:
+            if not isinstance(response, dict):
+                continue
+            if response.get("correct_rule") is None:
                 response.pop("correct_rule", None)
+            if response.get("withhold_option") is None:
+                response.pop("withhold_option", None)
     return dump
 
 

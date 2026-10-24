@@ -100,7 +100,22 @@ class ValidateExperimentInput(BaseModel):
             "is eq, neq or in; left/right are operands {var:name[,index]}, {factor:name} or "
             "{literal:str}; the boolean relation over the MATERIALIZED content selects "
             "true_option or false_option (both must be declared options), so the answer key "
-            "follows the generated content instead of a condition label."
+            "follows the generated content instead of a condition label. "
+            "responses[].withhold_option (string): declares that NO keypress is a meaningful "
+            "answer and names the answer-key value representing it (must differ from options); "
+            "the event log keeps value null for a withheld response and scoring treats null as "
+            "that value. blocks[].timing: whole-object per-block replacement of the spec-level "
+            "timing (set all three fields; omitted fields fall back to defaults). "
+            "Composition recipes (v2, for RELATIONAL content across factors): (1) bind a "
+            "target element per level of a content factor using singleton pools guarded by "
+            "when={factor:level}; a second element REUSES it via copy_from in one condition "
+            "(same content) and draws from the full pool with exclude=[target] in the other "
+            "(guaranteed different content). (2) conditional correctness: declare the intended "
+            "answer as a factor, derive the stimulus from it via when-guards, and set "
+            "correct_from to that factor. (3) make factor levels differ in REAL content with "
+            "count={factor,levels:{level:int}} element-count maps. (4) score no-press as "
+            "correct: withhold_option on the response plus a key that equals the withhold "
+            "value on those trials (correct_rule true/false_option may be the withhold value)."
         )
     )
     previous_errors: list[str] = Field(default_factory=list)  # error_code:path fingerprints of previous rounds

@@ -123,7 +123,9 @@ def build_explore_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[s
             "the explore-and-encounter layout requires trial_trigger='explore-encounter'"
         )
 
-    # responses: Phase 1 supports choice responses only (documented limitation)
+    # responses: Phase 1 supports choice responses only (documented limitation);
+    # withhold_option (Stage 1) is projected ONLY when declared, so plans without
+    # withhold semantics keep the exact historical bytes
     responses: list[dict[str, object]] = []
     for raw in cast(list[object], spec["responses"]):
         item = cast(dict[str, object], raw)
@@ -132,14 +134,15 @@ def build_explore_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[s
                 f"explore layout supports choice responses only (Phase 1); "
                 f"response {item.get('name')!r} has kind {item.get('kind')!r}"
             )
-        responses.append(
-            {
-                "name": item["name"],
-                "kind": "choice",
-                "options": item.get("options"),
-                "correct_from": item.get("correct_from"),
-            }
-        )
+        response: dict[str, object] = {
+            "name": item["name"],
+            "kind": "choice",
+            "options": item.get("options"),
+            "correct_from": item.get("correct_from"),
+        }
+        if item.get("withhold_option") is not None:
+            response["withhold_option"] = item["withhold_option"]
+        responses.append(response)
 
     # bindings: the mapping surface is the encounter-trial surface (G8 requires
     # response_bindings for the explore-encounter trigger; the builder is strict —
@@ -308,8 +311,12 @@ def render_explore_html(bundle: dict[str, object], game_spec: GameSpec) -> str:
         isinstance(step, dict) and "phases" in step
         for step in cast(list[object], plan["trials"])
     )
+    has_withhold = any(
+        isinstance(response, dict) and "withhold_option" in response
+        for response in cast(list[object], cast(dict[str, object], plan["meta"])["responses"])
+    )
     return _assemble(
-        html.escape(title, quote=True), body_class, data_script, _engine_script(has_phases)
+        html.escape(title, quote=True), body_class, data_script, _engine_script(has_phases, has_withhold)
     )
 
 
@@ -1041,16 +1048,21 @@ _PHASED_ADDON_JS = """\
 """
 
 
-def _engine_script(phased: bool) -> str:
+def _engine_script(phased: bool, withhold: bool = False) -> str:
     """Engine JS for one rendering: the historical bytes, plus the phased addon
-    (player + dispatch) ONLY when the plan carries phased trials."""
-    if not phased:
+    (player + dispatch) ONLY when the plan carries phased trials, plus the
+    withhold patch ONLY when the plan declares withhold_option.
+
+    Unphased and non-withhold output is byte-identical to the historical engine;
+    the two patches touch disjoint regions, so they compose.
+    """
+    if not phased and not withhold:
         return _ENGINE_JS
-    if _ENGINE_JS.count(_RUNENCOUNTER_ANCHOR) != 1:
-        raise ValueError("runEncounter anchor not unique in the explore engine")
-    return (
-        PHASE_PLAYER_JS
-        + _ENGINE_JS.replace(
+    engine = _ENGINE_JS
+    if phased:
+        if _ENGINE_JS.count(_RUNENCOUNTER_ANCHOR) != 1:
+            raise ValueError("runEncounter anchor not unique in the explore engine")
+        engine = PHASE_PLAYER_JS + engine.replace(
             _RUNENCOUNTER_ANCHOR,
             _PHASED_ADDON_JS
             + _RUNENCOUNTER_ANCHOR
@@ -1058,7 +1070,105 @@ def _engine_script(phased: bool) -> str:
             " { return runPhasedEncounter(obj); }\n",
             1,
         )
-    )
+    if withhold:
+        engine = _apply_withhold_patch(engine)
+    return engine
+
+
+# ---------------------------------------------------------------------------
+# Withhold-aware runtime patch (Expressiveness Stage 1). Applied ONLY when the
+# plan carries a response that declares withhold_option, so every game without
+# withhold semantics keeps the exact historical engine bytes. Semantics: the
+# event log records behavior — a deadline expiry stays value: null — and only
+# the SCORING rule treats null as an answer. The withheld:true event marker and
+# the feedback branch are gated on the response declaring withhold_option
+# (explicit undefined checks throughout: a bare undefined === undefined
+# comparison must never score a miss as correct).
+# ---------------------------------------------------------------------------
+
+_LOGMEASUREMENT_ANCHOR = (
+    '  function logMeasurement(ev) { ev.channel = "measurement";'
+    " ev.t_epoch_ms = Date.now(); events.push(ev); }\n"
+)
+_LOGMEASUREMENT_WITHHOLD = """\
+  function logMeasurement(ev) {
+    ev.channel = "measurement";
+    ev.t_epoch_ms = Date.now();
+    // withhold marker: a null response value on a response that declares
+    // withhold_option is a deliberate no-press, flagged for offline analysis
+    if (ev.event === "response" && ev.value === null && ev.response_name) {
+      for (var wi = 0; wi < M.responses.length; wi++) {
+        if (M.responses[wi].name === ev.response_name
+            && M.responses[wi].withhold_option !== undefined
+            && M.responses[wi].withhold_option !== null) {
+          ev.withheld = true;
+          break;
+        }
+      }
+    }
+    events.push(ev);
+  }
+"""
+
+_COMPUTECORRECT_ANCHOR = """\
+  function computeCorrect(trial, respName, value) {
+    if (!Object.prototype.hasOwnProperty.call(trial.correct, respName)) { return null; }
+    if (value === null) { return false; }
+    return value === trial.correct[respName];
+  }
+"""
+_COMPUTECORRECT_WITHHOLD = """\
+  function computeCorrect(trial, respName, value) {
+    if (!Object.prototype.hasOwnProperty.call(trial.correct, respName)) { return null; }
+    if (value !== null) { return value === trial.correct[respName]; }
+    // no keypress: an answer ONLY when the response declares withhold_option
+    // AND the expected key IS that value (explicit defined-check: a bare
+    // undefined === undefined comparison must never score a miss correct)
+    var resp = null;
+    for (var i = 0; i < M.responses.length; i++) {
+      if (M.responses[i].name === respName) { resp = M.responses[i]; break; }
+    }
+    return !!(resp && resp.withhold_option !== undefined && resp.withhold_option !== null
+              && trial.correct[respName] === resp.withhold_option);
+  }
+"""
+
+_SHOWFEEDBACK_HEAD_ANCHOR = """\
+  function showFeedback(correct, value) {
+    var style = M.feedback.on_response;
+    var dur = M.feedback.duration_ms;
+    if (style === "none" || dur <= 0) { return Promise.resolve(); }
+    var text;
+    if (value === null) { text = "missed"; }
+"""
+_SHOWFEEDBACK_HEAD_WITHHOLD = """\
+  function showFeedback(correct, value, resp) {
+    var style = M.feedback.on_response;
+    var dur = M.feedback.duration_ms;
+    if (style === "none" || dur <= 0) { return Promise.resolve(); }
+    var text;
+    // a withheld response (null on a withhold-declaring response) is a real
+    // answer: it shows correct/incorrect, not "missed"
+    var withheldAnswer = !!(value === null && resp
+      && resp.withhold_option !== undefined && resp.withhold_option !== null);
+    if (value === null && !withheldAnswer) { text = "missed"; }
+"""
+
+_WITHHOLD_SPLICES_EXPLORE: tuple[tuple[str, str], ...] = (
+    (_LOGMEASUREMENT_ANCHOR, _LOGMEASUREMENT_WITHHOLD),
+    (_COMPUTECORRECT_ANCHOR, _COMPUTECORRECT_WITHHOLD),
+    (_SHOWFEEDBACK_HEAD_ANCHOR, _SHOWFEEDBACK_HEAD_WITHHOLD),
+    ("return showFeedback(correct, value);", "return showFeedback(correct, value, resp);"),
+)
+
+
+def _apply_withhold_patch(js: str) -> str:
+    """Exact-anchor withhold patch (fails closed on a missing anchor)."""
+    for old, new in _WITHHOLD_SPLICES_EXPLORE:
+        if old not in js:
+            raise ValueError(f"withhold patch anchor missing: {old[:60]!r}")
+        js = js.replace(old, new)
+    return js
 
 
 _TEMPLATE = """<!DOCTYPE html>

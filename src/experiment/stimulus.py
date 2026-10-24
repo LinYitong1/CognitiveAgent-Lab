@@ -728,12 +728,19 @@ def validate_correct_rules(spec: ExperimentSpec) -> list[RawIssue]:
                 "use one of: " + ", ".join(RULE_OP_WHITELIST),
             ))
         for value, key in ((rule.true_option, "true_option"), (rule.false_option, "false_option")):
-            if value not in response.options:
+            # an option OR the response's withhold_option (withhold-as-answer:
+            # the rule outcome may map onto the no-response key value)
+            allowed = set(response.options)
+            if response.withhold_option is not None:
+                allowed.add(response.withhold_option)
+            if value not in allowed:
                 issues.append((
                     "V2_RULE_OPTION_UNKNOWN", f"{base}.{key}",
-                    f"{key} {value!r} is not a declared option of response "
-                    f"{response.name!r} (options: {response.options})",
-                    "map the rule result onto declared options of this response",
+                    f"{key} {value!r} is neither a declared option of response "
+                    f"{response.name!r} nor its withhold_option (options: "
+                    f"{response.options}, withhold_option: {response.withhold_option!r})",
+                    "map the rule result onto declared options of this response, "
+                    "or onto its withhold_option",
                 ))
         for side in ("left", "right"):
             operand = getattr(rule, side)
@@ -775,6 +782,41 @@ def validate_correct_rules(spec: ExperimentSpec) -> list[RawIssue]:
                     f"operand references undeclared factor {operand.factor!r}",
                     "use one of the declared factor names: " + ", ".join(sorted(known_factors)),
                 ))
+    return issues
+
+
+def validate_withhold(spec: ExperimentSpec) -> list[RawIssue]:
+    """Validate responses[].withhold_option (withhold-as-answer semantics).
+
+    The runtime event log keeps value=null for a withheld response (behavior is
+    recorded, never substituted by a string); withhold_option only declares
+    that null is a meaningful answer and names the answer-key value that
+    represents it. Checks are paradigm-neutral: kind, option collision only.
+    Note (documented, not an error): correct_from-derived keys may legitimately
+    equal the withhold_option value (e.g. a level named like the withhold
+    value), which makes a withheld response correct on those trials.
+    """
+    issues: list[RawIssue] = []
+    for ri, response in enumerate(spec.responses):
+        if response.withhold_option is None:
+            continue
+        base = f"responses[{ri}].withhold_option"
+        if response.kind != "choice":
+            issues.append((
+                "V2_WITHHOLD_KIND", base,
+                f"response {response.name!r} has kind {response.kind!r}; withhold "
+                "semantics are declared on choice responses only (the pressable "
+                "answers live in options, the no-press answer in withhold_option)",
+                "use kind='choice' with the pressable options, or remove withhold_option",
+            ))
+        if response.withhold_option in response.options:
+            issues.append((
+                "V2_WITHHOLD_COLLISION", base,
+                f"withhold_option {response.withhold_option!r} collides with a "
+                f"declared option of response {response.name!r}",
+                "the withhold value represents NO keypress and must differ from "
+                "every option (rename it, e.g. 'withhold')",
+            ))
     return issues
 
 

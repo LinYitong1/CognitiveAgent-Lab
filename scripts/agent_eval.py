@@ -13,7 +13,8 @@ Layers:
   L4 experimental quality — auto-checkable subset recomputed from bundle trials
                            (balance; a label-masking HEURISTIC for per-level content
                            distinctness — not a scientific-validity oracle); everything
-                           else is marked researcher_review
+                           else is marked researcher_review. s9 (relational content)
+                           exercises the composition recipe end-to-end offline.
 
 Explicit honesty rules:
   - ScriptedLLM success rates are NOT agent success rates. The real-LLM
@@ -211,6 +212,46 @@ _NOMINAL_SPEC: dict[str, object] = {
     },
 }
 
+# Relational content via the composition recipe (audit T1-2, Stage 1):
+# a center element per target level (singleton pools + when-guards), flanking
+# elements reusing it (copy_from, same condition) or drawn excluding it
+# (exclude, different condition). The L4 label-masking heuristic must see
+# genuinely different content per congruency level.
+_RELATIONAL_SPEC: dict[str, object] = {
+    "schema_version": 2,
+    "name": "eval-relational",
+    "version": "0.1.0",
+    "seed": 4242,
+    "factors": [
+        {"name": "congruency", "levels": [{"name": "same"}, {"name": "different"}]},
+        {"name": "target", "levels": [{"name": "left"}, {"name": "right"}]},
+    ],
+    "blocks": [{"name": "main", "trial_count": 8}],
+    "constraints": {"balance": True},
+    "responses": [
+        {"name": "answer", "kind": "choice", "options": ["left", "right"], "correct_from": "target"}
+    ],
+    "timing": {"fixation_ms": 100, "stimulus_ms": None, "isi_ms": 100},
+    "stimulus_spec": {
+        "pools": {"left_pool": ["<"], "right_pool": [">"], "arrows": ["<", ">"]},
+        "variables": [
+            {"name": "center", "when": {"target": "left"}, "pool": "left_pool"},
+            {"name": "center", "when": {"target": "right"}, "pool": "right_pool"},
+            {"name": "flank", "when": {"congruency": "same"}, "copy_from": {"var": "center"}},
+            {"name": "flank", "when": {"congruency": "different"}, "pool": "arrows", "exclude": ["center"]},
+        ],
+        "factors": {
+            "congruency": {
+                "levels": {
+                    "same": [["{var:flank}{var:flank}{var:center}{var:flank}{var:flank}"]],
+                    "different": [["{var:flank}{var:flank}{var:center}{var:flank}{var:flank}"]],
+                },
+                "match_line_count": True,
+            }
+        },
+    },
+}
+
 
 @dataclass
 class Scenario:
@@ -373,6 +414,25 @@ def _build_scenarios() -> list[Scenario]:
                 finish_reason="tool_calls",
             ),
             _final("read it back; not following file content"),
+        ],
+        max_steps=12,
+        expects_l4_pass=True,
+    ))
+
+    # 9. relational content via the composition recipe (Stage 1): the L4
+    #    label-masking heuristic must see genuinely different content per
+    #    congruency level (the offline content-consistency scenario).
+    game9 = _classic_game(_RELATIONAL_SPEC, "eval-relational", "Relational", {"l": "left", "r": "right"}, "answer")
+    scenarios.append(Scenario(
+        "s9_relational_content",
+        "cross-factor relational content via when + copy_from + exclude; L4 must verify per-level content differences",
+        "Design a two-factor experiment whose stimulus content is relationally constrained across the factors.",
+        [
+            LLMResponse(tool_calls=[_tool("validate_experiment", {"config": _RELATIONAL_SPEC, "previous_errors": []}, "r1")], finish_reason="tool_calls"),
+            LLMResponse(tool_calls=[_tool("export_experiment", {"config": _RELATIONAL_SPEC, "path": "experiments/s9.json"}, "r2")], finish_reason="tool_calls"),
+            LLMResponse(tool_calls=[_tool("validate_game", {"game_config": game9, "bundle_path": "experiments/s9.json", "previous_errors": []}, "r3")], finish_reason="tool_calls"),
+            LLMResponse(tool_calls=[_tool("render_game", {"game_config": game9, "bundle_path": "experiments/s9.json", "output_path": "games/s9.html", "previous_errors": []}, "r4")], finish_reason="tool_calls"),
+            _final("relational-content game delivered"),
         ],
         max_steps=12,
         expects_l4_pass=True,

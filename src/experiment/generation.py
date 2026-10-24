@@ -226,7 +226,9 @@ def generate_trials(spec: ExperimentSpec, max_attempts: int = 100) -> GeneratedE
                     factors=dict(factors_map),
                     stimulus={},
                     derived={},
-                    timing=spec.timing,
+                    # block-level timing override (v2): whole-object replacement;
+                    # absent -> the spec-level timing (historical behavior)
+                    timing=block.timing if block.timing is not None else spec.timing,
                 )
             )
 

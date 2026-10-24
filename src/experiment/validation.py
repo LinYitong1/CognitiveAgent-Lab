@@ -37,6 +37,7 @@ from src.experiment.stimulus import (
     validate_phases,
     validate_stimulus_spec,
     validate_variables,
+    validate_withhold,
 )
 
 MAX_ERRORS = 20  # errors cap (§5.1)
@@ -112,12 +113,17 @@ class ErrorCode:
     V2_PHASE_TEMPLATE_CONFLICT = "V2_PHASE_TEMPLATE_CONFLICT"
     V2_PHASE_WINDOW_COUNT = "V2_PHASE_WINDOW_COUNT"
 
+    # Expressiveness Stage 1: withhold-as-answer semantics (additive)
+    V2_WITHHOLD_KIND = "V2_WITHHOLD_KIND"
+    V2_WITHHOLD_COLLISION = "V2_WITHHOLD_COLLISION"
+
 
 class WarningCode:
     """Warning-code enumeration (contract §4.4)."""
 
     WEIGHT_IGNORED = "WEIGHT_IGNORED"
     RATIO_ROUNDED = "RATIO_ROUNDED"
+    BLOCK_TIMING_OVERRIDE = "BLOCK_TIMING_OVERRIDE"
 
 
 # UNSAT error-code set (§4.4 category mapping; assertion scope of test_unsat_error_code_mapping)
@@ -467,12 +473,17 @@ def _check_block_satisfiability(
             )
 
 
-def _check_v2_fields(spec: ExperimentSpec, errors: list[ValidationIssue]) -> None:
+def _check_v2_fields(
+    spec: ExperimentSpec,
+    errors: list[ValidationIssue],
+    warnings: list[ValidationIssue],
+) -> None:
     """M2-B v2 research-layer checks (D-M2-1 contract §1.5/§1.7).
 
     - schema_version 1 with any v2 field SET (including explicit null) → V2_VERSION_MISMATCH;
     - schema_version 2: run the v2 semantic validators for each SET feature
-      (M3-A P0 adds intra-trial variables and content-driven correctness rules).
+      (M3-A P0 adds intra-trial variables and content-driven correctness rules;
+      Stage 1 adds responses[].withhold_option and blocks[].timing).
     Explicit null on schema_version 2 is equivalent to absent (no checks, no dump key).
     """
     v2_set = [name for name in _V2_OPTIONAL_FIELDS if name in spec.model_fields_set]
@@ -493,6 +504,23 @@ def _check_v2_fields(spec: ExperimentSpec, errors: list[ValidationIssue]) -> Non
                            "set schema_version to 2 to use content-driven correctness, "
                            "or remove the field")
                 ))
+            if response.withhold_option is not None:
+                errors.append((
+                    _issue(ErrorCode.V2_VERSION_MISMATCH, f"responses[{ri}].withhold_option",
+                           "withhold_option is a schema_version 2 feature but this spec "
+                           "declares schema_version 1",
+                           "set schema_version to 2 to use withhold-as-answer semantics, "
+                           "or remove the field")
+                ))
+        for bi, block in enumerate(spec.blocks):
+            if block.timing is not None:
+                errors.append((
+                    _issue(ErrorCode.V2_VERSION_MISMATCH, f"blocks[{bi}].timing",
+                           "block timing override is a schema_version 2 feature but this "
+                           "spec declares schema_version 1",
+                           "set schema_version to 2 to use per-block timing, or remove "
+                           "the field")
+                ))
         return
     raw_issues: list[tuple[str, str, str, str]] = []
     if spec.stimulus_spec is not None:
@@ -501,6 +529,7 @@ def _check_v2_fields(spec: ExperimentSpec, errors: list[ValidationIssue]) -> Non
         if spec.stimulus_spec.phases is not None:
             raw_issues.extend(validate_phases(spec))
     raw_issues.extend(validate_correct_rules(spec))
+    raw_issues.extend(validate_withhold(spec))
     if spec.derived_spec is not None:
         raw_issues.extend(validate_derived_spec(spec))
     if spec.measures is not None:
@@ -509,6 +538,18 @@ def _check_v2_fields(spec: ExperimentSpec, errors: list[ValidationIssue]) -> Non
         errors.append(
             ValidationIssue(error_code=code, path=path, message=message, suggestion=suggestion)
         )
+    # BLOCK_TIMING_OVERRIDE: whole-object replacement semantics — unspecified
+    # fields fall back to the TimingSpec defaults, not to the spec-level values
+    for bi, block in enumerate(spec.blocks):
+        if block.timing is not None:
+            warnings.append(
+                _issue(WarningCode.BLOCK_TIMING_OVERRIDE, f"blocks[{bi}].timing",
+                       f"block {block.name!r} overrides the spec-level timing with a "
+                       "whole-object replacement (fixation_ms, stimulus_ms, isi_ms); "
+                       "fields omitted from the override fall back to their DEFAULTS, "
+                       "not to the spec-level values",
+                       "set all three timing fields explicitly in the block override")
+            )
 
 
 def validate_spec(config: Mapping[str, object]) -> ValidationResult:
@@ -527,7 +568,7 @@ def validate_spec(config: Mapping[str, object]) -> ValidationResult:
     _check_support(spec, errors)
     _check_constraint_semantics(spec, errors, warnings)
     _check_block_satisfiability(spec, errors, warnings)
-    _check_v2_fields(spec, errors)
+    _check_v2_fields(spec, errors, warnings)
     fingerprint = sha256_hex(canonical_json(spec_dump(spec)))
     return _finalize(spec, errors, warnings, fingerprint, _stats(spec, config))
 

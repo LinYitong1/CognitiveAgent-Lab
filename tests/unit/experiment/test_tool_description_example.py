@@ -83,3 +83,42 @@ def test_description_covers_required_top_keys() -> None:
     spec = experiment_tools.build_validate_spec(Settings())
     for key in REQUIRED_TOP_KEYS:
         assert key in spec.description, f"structure summary is missing a required key: {key}"
+
+
+# ---------------------------------------------------------------------------
+# Expressiveness Stage 1: the composition recipes live in the config FIELD
+# description (the established v2 documentation surface) while the ToolSpec-level
+# description stays within its budget. Same ASCII discipline as the R2 core.
+# ---------------------------------------------------------------------------
+
+_RECIPE_MARKERS = (
+    "Composition recipes",
+    "copy_from",   # recipe 1: relational content via reuse
+    "exclude",     # recipe 1: guaranteed-different draw
+    "when={factor:level}",  # recipe 1/2 guard syntax
+    "withhold_option",  # recipe 4: no-press as a correct answer
+    "count={factor,levels",  # recipe 3: per-level element-count maps
+)
+
+
+def test_field_description_is_pure_ascii() -> None:
+    """The config field description (the v2 documentation surface) is pure ASCII."""
+    field = experiment_tools.ValidateExperimentInput.model_fields["config"]
+    non_ascii = [c for c in (field.description or "") if ord(c) >= 128]
+    assert not non_ascii, f"field description contains non-ASCII characters: {non_ascii[:10]}"
+
+
+def test_field_description_contains_composition_recipes() -> None:
+    """The when+copy_from+exclude composition pattern (audit T1-2) is documented
+    for the LLM in the config field description, paradigm-name-free."""
+    field = experiment_tools.ValidateExperimentInput.model_fields["config"]
+    description = field.description or ""
+    for marker in _RECIPE_MARKERS:
+        assert marker in description, f"composition recipe marker missing: {marker!r}"
+
+
+def test_toolspec_description_budget_unchanged_by_recipes() -> None:
+    """Recipes are documented in the FIELD description; the ToolSpec-level
+    description keeps the R2 budgets (soft 700 / hard 900)."""
+    spec = experiment_tools.build_validate_spec(Settings())
+    assert len(spec.description) <= DESCRIPTION_HARD_BUDGET

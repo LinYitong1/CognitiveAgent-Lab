@@ -90,15 +90,18 @@ def build_run_plan(bundle: dict[str, object], game_spec: GameSpec) -> dict[str, 
     responses: list[dict[str, object]] = []
     for raw in responses_raw:
         item = cast(dict[str, object], raw)
-        responses.append(
-            {
-                "name": item["name"],
-                "kind": item["kind"],
-                "options": item.get("options"),
-                "scale": item.get("scale"),
-                "correct_from": item.get("correct_from"),
-            }
-        )
+        # withhold_option (Stage 1) is included ONLY when declared, so every
+        # plan without withhold semantics keeps the exact historical bytes
+        response: dict[str, object] = {
+            "name": item["name"],
+            "kind": item["kind"],
+            "options": item.get("options"),
+            "scale": item.get("scale"),
+            "correct_from": item.get("correct_from"),
+        }
+        if item.get("withhold_option") is not None:
+            response["withhold_option"] = item["withhold_option"]
+        responses.append(response)
     factor_order = [cast(str, cast(dict[str, object], f)["name"]) for f in factors_raw]
 
     steps: list[dict[str, object]] = []
@@ -245,7 +248,11 @@ def render_game_html(bundle: dict[str, object], game_spec: GameSpec) -> str:
         isinstance(step, dict) and "phases" in step
         for step in cast(list[object], plan["steps"])
     )
-    return _assemble(html.escape(title, quote=True), body_class, data_script, _engine_script(has_phases))
+    has_withhold = any(
+        isinstance(response, dict) and "withhold_option" in response
+        for response in cast(list[object], cast(dict[str, object], plan["meta"])["responses"])
+    )
+    return _assemble(html.escape(title, quote=True), body_class, data_script, _engine_script(has_phases, has_withhold))
 
 
 def _split_once(template: str, placeholder: str) -> tuple[str, str]:
@@ -393,26 +400,126 @@ _PHASED_ADDON_JS = """\
 """
 
 
-def _engine_script(phased: bool) -> str:
-    """Engine JS for one rendering: the historical bytes, plus the phased addon
-    (player + dispatch) ONLY when the plan carries phased trials.
+# ---------------------------------------------------------------------------
+# Withhold-aware runtime patch (Expressiveness Stage 1). Applied ONLY when the
+# plan carries a response that declares withhold_option, so every game without
+# withhold semantics keeps the exact historical engine bytes (golden gate).
+# Semantics: the event log records behavior — a deadline expiry stays
+# value: null — and only the SCORING rule treats null as an answer. The
+# withheld:true event marker and the feedback branch are gated on the response
+# declaring withhold_option (explicit undefined checks throughout: a bare
+# undefined === undefined comparison must never score a miss as correct).
+# ---------------------------------------------------------------------------
 
-    Unphased output is byte-identical to the pre-P1 engine (golden gate).
+_LOGEVENT_ANCHOR = (
+    "  function logEvent(ev) { ev.t_epoch_ms = Date.now(); events.push(ev); }\n"
+)
+_LOGEVENT_WITHHOLD = """\
+  function logEvent(ev) {
+    ev.t_epoch_ms = Date.now();
+    // withhold marker: a null response value on a response that declares
+    // withhold_option is a deliberate no-press, flagged for offline analysis
+    if (ev.event === "response" && ev.value === null && ev.response_name) {
+      for (var wi = 0; wi < M.responses.length; wi++) {
+        if (M.responses[wi].name === ev.response_name
+            && M.responses[wi].withhold_option !== undefined
+            && M.responses[wi].withhold_option !== null) {
+          ev.withheld = true;
+          break;
+        }
+      }
+    }
+    events.push(ev);
+  }
+"""
+
+_COMPUTECORRECT_ANCHOR = """\
+  function computeCorrect(resp, step, value) {
+    var has = step.correct && Object.prototype.hasOwnProperty.call(step.correct, resp.name);
+    if (!has) { return null; }
+    var expected = step.correct[resp.name];
+    if (value === null) { return false; }
+    return value === expected;
+  }
+"""
+_COMPUTECORRECT_WITHHOLD = """\
+  function computeCorrect(resp, step, value) {
+    var has = step.correct && Object.prototype.hasOwnProperty.call(step.correct, resp.name);
+    if (!has) { return null; }
+    var expected = step.correct[resp.name];
+    if (value === null) {
+      // no keypress: an answer ONLY when the response declares withhold_option
+      // AND the expected key IS that value (explicit defined-check: a bare
+      // undefined === undefined comparison must never score a miss correct)
+      return resp.withhold_option !== undefined && resp.withhold_option !== null
+        && expected === resp.withhold_option;
+    }
+    return value === expected;
+  }
+"""
+
+_SHOWFEEDBACK_HEAD_ANCHOR = """\
+  function showFeedback(correct, value) {
+    var style = M.feedback.on_response;
+    var dur = M.feedback.duration_ms;
+    if (style === "none" || dur <= 0) { return Promise.resolve(); }
+    var text;
+    if (value === null) { text = "missed"; }
+"""
+_SHOWFEEDBACK_HEAD_WITHHOLD = """\
+  function showFeedback(correct, value, resp) {
+    var style = M.feedback.on_response;
+    var dur = M.feedback.duration_ms;
+    if (style === "none" || dur <= 0) { return Promise.resolve(); }
+    var text;
+    // a withheld response (null on a withhold-declaring response) is a real
+    // answer: it shows correct/incorrect, not "missed"
+    var withheldAnswer = !!(value === null && resp
+      && resp.withhold_option !== undefined && resp.withhold_option !== null);
+    if (value === null && !withheldAnswer) { text = "missed"; }
+"""
+
+_WITHHOLD_SPLICES_CLASSIC: tuple[tuple[str, str], ...] = (
+    (_LOGEVENT_ANCHOR, _LOGEVENT_WITHHOLD),
+    (_COMPUTECORRECT_ANCHOR, _COMPUTECORRECT_WITHHOLD),
+    (_SHOWFEEDBACK_HEAD_ANCHOR, _SHOWFEEDBACK_HEAD_WITHHOLD),
+    ("return showFeedback(correct, value);", "return showFeedback(correct, value, resp);"),
+)
+
+
+def _apply_withhold_patch(js: str) -> str:
+    """Exact-anchor withhold patch (fails closed on a missing anchor)."""
+    for old, new in _WITHHOLD_SPLICES_CLASSIC:
+        if old not in js:
+            raise ValueError(f"withhold patch anchor missing: {old[:60]!r}")
+        js = js.replace(old, new)
+    return js
+
+
+def _engine_script(phased: bool, withhold: bool = False) -> str:
+    """Engine JS for one rendering: the historical bytes, plus the phased addon
+    (player + dispatch) ONLY when the plan carries phased trials, plus the
+    withhold patch ONLY when the plan declares withhold_option.
+
+    Unphased and non-withhold output is byte-identical to the pre-P1 engine
+    (golden gate); the two patches touch disjoint regions, so they compose.
     """
-    if not phased:
+    if not phased and not withhold:
         return _ENGINE_JS
-    if _ENGINE_JS.count(_RUNTRIAL_ANCHOR) != 1:
-        raise ValueError("runTrial anchor not unique in the classic engine")
-    return (
-        PHASE_PLAYER_JS
-        + _ENGINE_JS.replace(
+    engine = _ENGINE_JS
+    if phased:
+        if _ENGINE_JS.count(_RUNTRIAL_ANCHOR) != 1:
+            raise ValueError("runTrial anchor not unique in the classic engine")
+        engine = PHASE_PLAYER_JS + engine.replace(
             _RUNTRIAL_ANCHOR,
             _PHASED_ADDON_JS
             + _RUNTRIAL_ANCHOR
             + "    if (step.phases) { return runPhasedTrial(step); }\n",
             1,
         )
-    )
+    if withhold:
+        engine = _apply_withhold_patch(engine)
+    return engine
 
 
 def _assemble(title: str, body_class: str, data_script: str, engine_script: str) -> str:
