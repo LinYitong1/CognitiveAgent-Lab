@@ -46,7 +46,7 @@ exclude, no research data layer).
 | Item | Value |
 |---|---|
 | Engine/experiment code | unchanged from Stage 1 commit `fdf671d` (this round touched only agent LLM client budget params, scripts, tests, docs) |
-| E1 preflight commit | **see the freeze-commit note below** (the commit containing this file) |
+| E1 preflight commit | **`0baaab6`** (local main; this is the commit the E1-B real run must execute on — re-run `--dryrun` + `--selfcheck` if HEAD moves past it) |
 | Model | `gemini-3.8-flash` via OpenAI-compatible endpoint (`v1beta/openai/`) |
 | Prices assumed | $0.75 / 1M input, $3.75 / 1M output-billable (thinking billed as output; intro rates to 2026-12-31) |
 | Briefs version | `e1-briefs-v1` (runner-embedded verbatim; docs/agent-evaluation/02 is the rendered copy) |
