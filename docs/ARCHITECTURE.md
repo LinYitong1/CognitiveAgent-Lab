@@ -3,6 +3,27 @@
 > Version: v1.2 ｜ Status: **revised per review feedback** (v1.1 went through two independent reviews — the architecture review and the QA acceptance-criteria check; v1.2 fixes the P0/Major issues they raised)
 > Decision records (ADRs) are appended at the end; the v1.0→v1.1 and v1.1→v1.2 changelogs are at the end too.
 
+> **⚠️ Implementation status (added by the Foundation Hardening audit — read this first).**
+> This document is the original **design plan**, not a description of the
+> current codebase. As of HEAD the following sections describe capabilities
+> that are **designed but NOT implemented**:
+>
+> - §5/§6 task API (`POST /tasks`, `/tasks/{id}/resume`) — not implemented;
+>   `src/api/app.py` exposes only `GET /health`.
+> - SSE event streaming (`Last-Event-ID` reconnection) — not implemented.
+> - SQLite persistence, checkpoints, recovery locks, `src/storage/` — the
+>   directory does not exist; the only persistence is the JSONL event log
+>   (`src/agent/events.py`), and `AgentLoop` has no resume semantics.
+> - The `web/` frontend — not implemented.
+>
+> What **is** implemented (the audited core): the single AgentLoop
+> (`src/agent/loop.py`, max-steps guard, additive observability fields), the
+> ToolRegistry with strict Pydantic tool schemas, 9 tools incl. the
+> deterministic experiment engine and HTML renderer (`src/experiment/`),
+> the pipeline facade with independent bundle verification (`src/pipeline.py`),
+> and the JSONL event log. See `docs/agent-foundation/01-baseline-audit.md`
+> for the full code-evidenced gap matrix.
+
 ## 1. System goal
 
 Build an AI agent system that understands user goals, autonomously decomposes tasks, selects tools, executes multi-step workflows, persists task state, and produces execution results with observable logs. **Purely engineering-oriented**: no R code, cognitive models, or pre-existing experiment data are integrated.

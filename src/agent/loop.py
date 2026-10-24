@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 from src.agent.events import EventLog
 from src.agent.llm import LLMClientProtocol, Message
-from src.agent.registry import ToolRegistry
+from src.agent.registry import ToolRegistry, classify_tool_error
 from src.config import Settings
 from src.models.agent_result import AgentResult
 from src.models.events import AgentEvent, AgentEventType
@@ -82,11 +83,17 @@ class AgentLoop:
         steps = 0
         status = "completed"
         result_text = ""
+        termination_reason = ""
+        tool_calls_total = 0
+        # cumulative provider-reported usage; None until a provider reports —
+        # never fabricated (FakeLLM/scripts without usage stay None)
+        cumulative_usage: dict[str, int] | None = None
 
         while True:
             if steps >= self._settings.calc_agent_max_steps:
                 status = "failed"
                 result_text = "max steps exceeded"
+                termination_reason = "max_steps_exceeded"
                 emit(AgentEventType.error, {"message": "max steps exceeded"})
                 break
             try:
@@ -97,15 +104,26 @@ class AgentLoop:
             except Exception as exc:  # retries exhausted / LLMProtocolError → unrecoverable
                 status = "failed"
                 result_text = f"llm error: {type(exc).__name__}: {exc}"
-                emit(AgentEventType.error, {"message": result_text[:_SUMMARY_LIMIT]})
+                termination_reason = "llm_error"
+                emit(
+                    AgentEventType.error,
+                    {"message": result_text[:_SUMMARY_LIMIT], "error_category": "llm_error"},
+                )
                 break
 
             steps += 1
+            if response.usage is not None:
+                if cumulative_usage is None:
+                    cumulative_usage = dict(response.usage)
+                else:
+                    for key, value in response.usage.items():
+                        cumulative_usage[key] = cumulative_usage.get(key, 0) + value
 
             if not response.tool_calls:
                 # the model gives its final answer; content produces no event (ADR-006)
                 status = "completed"
                 result_text = response.content
+                termination_reason = "model_final_answer"
                 break
 
             native_calls: list[dict[str, Any]] = []
@@ -140,16 +158,21 @@ class AgentLoop:
                         "args_summary": args_summary[:_SUMMARY_LIMIT],
                     },
                 )
+                tool_calls_total += 1
+                started = time.perf_counter()
                 tool_result = await self._registry.execute(call.tool_name, call.arguments)
+                duration_ms = int((time.perf_counter() - started) * 1000)
                 summary = tool_result.result if tool_result.ok else tool_result.error
-                emit(
-                    AgentEventType.tool_result,
-                    {
-                        "tool_call_id": tool_call_id,
-                        "ok": tool_result.ok,
-                        "result_summary": summary[:_SUMMARY_LIMIT],
-                    },
-                )
+                result_payload: dict[str, object] = {
+                    "tool_call_id": tool_call_id,
+                    "ok": tool_result.ok,
+                    "result_summary": summary[:_SUMMARY_LIMIT],
+                    "duration_ms": duration_ms,
+                }
+                if not tool_result.ok:
+                    # deterministic category from the frozen error-string prefixes
+                    result_payload["error_category"] = classify_tool_error(tool_result.error)
+                emit(AgentEventType.tool_result, result_payload)
                 tool_content = (
                     tool_result.result if tool_result.ok else f"ERROR: {tool_result.error}"
                 )
@@ -160,7 +183,15 @@ class AgentLoop:
         # final is always emitted (on every termination path)
         emit(
             AgentEventType.final,
-            {"status": status, "result_summary": result_text[:_SUMMARY_LIMIT]},
+            {
+                "status": status,
+                "result_summary": result_text[:_SUMMARY_LIMIT],
+                "termination_reason": termination_reason,
+                "model_calls": steps,
+                "tool_calls_total": tool_calls_total,
+                # cumulative provider-reported usage; null = provider did not report
+                "usage": cumulative_usage,
+            },
         )
         return AgentResult(
             task_id=self._task_id,
@@ -168,4 +199,6 @@ class AgentLoop:
             result=result_text,
             steps=steps,
             events=events,
+            termination_reason=termination_reason,
+            usage=cumulative_usage,
         )
