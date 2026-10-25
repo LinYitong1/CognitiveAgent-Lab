@@ -138,9 +138,16 @@ def _git_head() -> tuple[str, bool]:
             ["git", "status", "--porcelain"], cwd=REPO_ROOT,
             capture_output=True, text=True, timeout=10,
         )
-        # ignore untracked-but-gitignored-adjacent noise: only tracked-file
-        # modifications make the tree 'dirty' for baseline purposes
-        dirty = bool(status.stdout.strip()) if status.returncode == 0 else True
+        # only tracked-file modifications make the tree 'dirty' for baseline
+        # purposes (intentionally local-only untracked files, e.g. the T2R
+        # report, must not flag every run as dirty)
+        if status.returncode == 0:
+            dirty = any(
+                line.strip() and not line.startswith("??")
+                for line in status.stdout.splitlines()
+            )
+        else:
+            dirty = True
         return commit, dirty
     except Exception:
         return "unknown", True
