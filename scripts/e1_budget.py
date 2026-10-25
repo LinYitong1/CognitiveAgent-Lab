@@ -16,13 +16,19 @@ Semantics (the run protocol's honesty rules, executable):
     - per-task cap exceeded  -> BudgetExceeded("budget-stop-cost");
     - total stop exceeded    -> BudgetExceeded("budget-stop-total").
 
-  What is and is NOT a hard cap (stated plainly)
-    - with the client-side `max_tokens` and `max_input_bytes` ceilings set
-      (src/agent/llm.py), each call's cost is bounded pre-call by construction:
-      (input ceiling + max_tokens) x prices. The count cap times that bound is
-      then a genuine worst-case total, and the cost thresholds trigger within
-      it. Without those ceilings, only the count cap is pre-call hard and the
-      cost caps are post-call stops (cap + at most one in-flight call).
+  What is and is NOT guaranteed (stated plainly)
+    - the request-count cap is the only STRICT pre-call guarantee on the
+      number of billable events (the guard raises before the capped call);
+    - the client-side ceilings (src/agent/llm.py) bound what we SEND per call:
+      payload bytes (<= max_input_bytes, refused pre-call) and the max_tokens
+      parameter (output ceiling, provider-enforced). The output-token cost is
+      thereby arithmetically capped (8,192 x price_out) IF the provider honors
+      the parameter; the input cost is only an ESTIMATE, because the
+      byte-to-token conversion is provider-dependent;
+    - the cost thresholds are post-call accounting stops, checked before the
+      next call and (via the shared total accumulator) before the next task —
+      they are NOT an absolute payment ceiling: actual spend can exceed a
+      threshold by the accounting drift of the in-flight call/task.
 """
 
 from __future__ import annotations

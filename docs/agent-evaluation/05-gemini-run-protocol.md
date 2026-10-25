@@ -27,37 +27,61 @@ runner (see 04's dry-run section and 06's freeze manifest).
 
 | Control | Value | Enforcement |
 |---|---|---|
-| Max model calls per task | **16** (`max_steps`) | **hard, pre-call** — the guard raises before the 17th call; the loop's own step cap (17) is a backstop |
-| Total model calls, all 5 tasks | **80** | hard, pre-call (the real bound is 5×16) |
-| Per-task estimated cost | ≤ **$0.30** | post-call accounting; exceeded → task stops before its next call |
-| Total estimated cost | ≤ **$1.50** expected, **$2.00 hard stop** | post-call accounting; exceeded → NO further task starts |
-| Max output tokens per call | **8,192** | **IMPLEMENTED** (`LLMClient(max_tokens=8192)`; mock-verified the parameter reaches the SDK) |
-| Max request payload | **96 KB** | **IMPLEMENTED** (`LLMClient(max_input_bytes=96*1024)`; oversized requests refused BEFORE the call) |
+| Max model calls per task | **16** | **hard, pre-call, mechanical** — the guard raises before the 17th call; the request is never sent (the loop's own step cap of 17 is a backstop) |
+| Total model calls, all 5 tasks | **80** (5×16) | hard, pre-call, mechanical |
+| Max request payload | **96 KB** | **hard, pre-call, mechanical** (`LLMClient(max_input_bytes=96*1024)`; oversized requests refused BEFORE the call) |
+| Max output tokens per call | **8,192** | per-call API parameter (`max_tokens`; mock-verified it reaches the SDK) — **enforced by the provider**, strict only if the provider honors it |
+| Per-task cost threshold | **$0.30** | **post-call accounting** — checked before each next call of the task; exceeded → task stops |
+| Total cost threshold | **$1.50 expected, $2.00 total stop** | **post-call accounting, cumulative across tasks** — checked before each next call and before each next task; exceeded → NO further task starts |
 | Per-call timeout | 60 s | SDK-level |
 | SDK retries | `max_retries=0` (historical practice; no silent double-billing) | SDK-level |
 | Loop-level retries | none (the loop never retries an LLM call) | architecture |
 | Request pacing | 15 s between calls | runner-level (`BudgetedClient(pacing_s=15)`) |
 
-**What the budget mechanism actually guarantees (updated; no "absolute hard
-cap" language).** With the two client-side ceilings now implemented and
-mock-verified, each call's cost is bounded PRE-CALL by construction:
-input ≤ 96 KB (≈ 24K tokens) and output ≤ 8,192 tokens → worst case ≈ $0.04
-per call. Therefore:
+**What the budget mechanism actually guarantees.** Four mechanisms with four
+DIFFERENT guarantee strengths — none of them alone is an "absolute payment
+cap", and this protocol does not claim one:
 
-- **Per-call cost: hard pre-call bound** (input ceiling + max_tokens).
-- **Per-task spend: hard bound** 16 × ≈$0.04 ≈ **$0.64 worst case**, with the
-  $0.30 threshold stopping the task earlier in practice (post-call accounting).
-- **Total spend: hard bound** 5 × $0.64 ≈ **$3.20 theoretical**, with the
-  $2.00 evaluation stop halting remaining tasks (post-call accounting, applied
-  before each next call and before each next task).
+1. **Request-count cap (16/task, 80 total)** — strict, mechanical, pre-call:
+   the guard raises before the capped call; it is the only strict guarantee on
+   the NUMBER of billable events.
+2. **Request-payload ceiling (96 KB)** — strict, mechanical, pre-call: an
+   oversized request is refused before it is sent. It bounds what we SEND
+   (bytes), not what the provider bills (tokens).
+3. **Output-token ceiling (`max_tokens=8192`)** — a per-call API parameter,
+   forwarded to the SDK (mock-verified). It bounds the output cost
+   arithmetically at 8,192 × $3.75/1M = **$0.03072 per call**, but ONLY IF
+   the provider honors the parameter (outside our control).
+4. **Cost thresholds ($0.30/task, $2.00 total)** — post-call accounting,
+   checked before the next call and, via a shared accumulator, before the next
+   task (see below). They are STOP thresholds, not a payment ceiling: cost is
+   known only after a call completes, so actual spend can exceed $2.00 by the
+   accounting drift of the in-flight task.
+
+**Cost arithmetic (honest, with its assumptions stated):**
+
+- Input part: the 96 KB ceiling bounds payload BYTES, not tokens. The
+  byte→token conversion is provider-dependent (English JSON is roughly
+  3.5–4 bytes/token, i.e. roughly 24–27K tokens), so the input cost per call
+  is an **estimate** (≈ $0.018–0.021 at $0.75/1M), not a proven bound.
+- Per-call estimated worst case: ≈ 24K input + 8,192 output ≈
+  $0.018 + $0.03072 ≈ **$0.049** (estimate, assumes the provider honors
+  `max_tokens`).
+- Per-task estimated worst case: 16 × $0.049 ≈ **$0.78**; five tasks ≈
+  **$3.90 — an estimate, NOT a cap.** The $2.00 total stop halts remaining
+  tasks well before that in practice, but because it is post-call accounting,
+  it does not make $2.00 (or $3.90) an absolute payment ceiling. In theory
+  only a provider ignoring `max_tokens` could exceed the estimate materially;
+  the 60 s timeout, `max_retries=0`, and the historical observation of ≤ ~1K
+  output tokens per call on this workload mitigate that residual risk.
+- **Cross-task accumulation**: every task's guard shares ONE `total_spent`
+  accumulator (reported usage + the conservative assumption for unreported
+  calls); the total stop is checked before every call of every task, so a
+  later task cannot start once the accumulator crosses $2.00.
 - **Usage-missing calls are never counted as $0**: the guard assumes a
-  conservative worst case ($0.05/call) for stopping purposes while the REPORTED
-  cost stays exactly what providers reported, marked as a lower bound
-  (`cost_is_lower_bound`).
-- The historical caveat ("no pre-call output bound, a single call could emit
-  66K tokens") is resolved by the implemented `max_tokens`; the remaining
-  residual risk is a provider that ignores the parameter, which the post-call
-  accounting and the per-task hard bound still contain.
+  conservative worst case ($0.05/call) for STOPPING purposes while the
+  REPORTED cost stays exactly what providers reported, marked as a lower
+  bound (`cost_is_lower_bound`).
 
 ## Retry policy
 
@@ -124,11 +148,11 @@ Cross-task comparison table + capability narrative → the E1-B report
 ## Expected budget arithmetic (why $1.50 is realistic)
 
 Per call (historical): ~9K input + ~1K output-billable ≈ $0.0104. Per task at
-16 calls ≈ $0.17. Five tasks ≈ **$0.83 expected**; the $2.00 hard stop covers
-a 2.4× overrun. With the implemented ceilings, the absolute worst case is
-5 × 16 × (24K input + 8K output) ≈ $2.40 — above the $2.00 stop, which then
-halts the remaining tasks before the theoretical bound is reached; in practice
-inputs are ~15% of the ceiling.
+16 calls ≈ $0.17. Five tasks ≈ **$0.83 expected**; the $2.00 total stop covers
+a 2.4× overrun of that expectation. The ESTIMATED worst case with all ceilings
+honored is ≈ $3.90 (see the cost-arithmetic block above — an estimate, not a
+cap); the total stop halts remaining tasks before it is approached, and
+historical inputs run ~15% of the payload ceiling.
 
 ## How to run E1-B (the runner is preflighted)
 
@@ -153,12 +177,14 @@ stop_reason), `scored.json` (D1–D8), and the produced artifacts
 
 ## Pre-flight checklist (E1-B day)
 
-- [x] User authorization for the total budget recorded (date + amount) — **pending**
-- [x] Code at the frozen baseline (06 freeze manifest; E1-A validated on it)
+- [ ] **User authorization for the total budget recorded (date + amount) —
+      PENDING; nothing below authorizes a paid call by itself**
+- [ ] Code at the final freeze HEAD (06's freeze manifest; the runner records
+      the executing HEAD into every run report's `commit` field)
 - [x] `--selfcheck` green (14-sample matrix, `_all_as_expected = True`)
 - [x] `tests/unit/test_e1_scorer.py` (22) + budget/runner tests green
 - [x] `--dryrun` green (6/6 scenarios)
-- [x] `max_tokens=8192` + input ceiling implemented and mock-verified
+- [x] `max_tokens=8192` + 96 KB input ceiling implemented and mock-verified
 - [ ] `.env` key present (checked at runner start; run refuses without it)
 - [ ] Disk writable under `data/e1-runs/` and `logs/`
 - [ ] Runner started with `--run-id e1b-<date>`; no reuse of old sandboxes

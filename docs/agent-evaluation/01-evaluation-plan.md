@@ -1,15 +1,24 @@
 # 01 — Real LLM Capability Evaluation Plan (Phase E1)
 
-Status: **E1-A complete (this round, zero paid API calls)** — evaluation plan,
-task briefs, scoring rubric, offline-validated scorer, and the real-run
-protocol are ready. **E1-B (the actual paid Gemini runs) awaits explicit user
-authorization.**
+Status: **E1-A complete; E1-B preflight complete (both zero paid API calls)** —
+evaluation plan, task briefs, scoring rubric, offline-validated scorer (v2),
+budget guard, and the preflighted runner are ready. **E1-B (the actual paid
+Gemini runs) awaits explicit user authorization.**
 
-Code baseline for E1: local commit `fdf671d` (Expressiveness Stage 1 —
-composition recipes in tool docs, `withhold_option`, `BlockSpec.timing`; 438
-tests, six quality gates PASS). The evaluation must run against this frozen
-version; any engine/tool change after this point invalidates the comparison
-and requires re-running E1-A's offline validation.
+## Code baselines (two distinct points — do not conflate)
+
+- **E1-A baseline (historical, 2026-10-24)**: local commit `fdf671d`
+  (Expressiveness Stage 1 — composition recipes in tool docs,
+  `withhold_option`, `BlockSpec.timing`; **438 tests**, six gates PASS). E1-A's
+  original scorer (v1, 10-test lock) and offline validation ran HERE.
+- **E1-B evaluation baseline (current, 2026-10-25)**: preflight commit
+  `0baaab6` (scorer v2 with task-level invariants, 22-test lock; budget guard;
+  runner; **477 tests**, coverage 91%) plus the budget-documentation
+  correction commit — the final freeze HEAD recorded in 06's freeze manifest.
+  The paid runs must execute on that HEAD; the runner records the actual
+  executing HEAD into every run report, so each run self-documents its
+  baseline. Any engine/tool change after the freeze invalidates the comparison
+  and requires re-running the offline validation.
 
 ## What E1 measures (and what it does not)
 
@@ -74,13 +83,24 @@ researcher review items).
   (gitignored, local only; full narrative in `docs/m3/M3A_T2R_REPORT.md`,
   local only).
 
-## Deliverables of this round
+## Deliverables
+
+E1-A round (baseline `fdf671d`, scorer v1):
 
 - `02-task-briefs.md` — the five natural-language briefs (verbatim, the ONLY
   task input the agent receives)
 - `03-scoring-rubric.md` — the eight dimensions and their verdict criteria
 - `04-offline-validation.md` — the scorer's fixed-sample validation results
 - `05-gemini-run-protocol.md` — the executable paid-run protocol (budget,
-  caps, hard stops, artifact retention)
+  caps, stops, artifact retention)
 - `scripts/e1_scorer.py` + `tests/unit/test_e1_scorer.py` — the scorer and its
-  regression lock (10 tests)
+  regression lock (10 tests at E1-A)
+
+E1-B preflight round (baseline `0baaab6` + corrections; scorer v2):
+
+- task-level acceptance invariants + 12 adversarial samples (03/04; 22-test
+  lock), `tests/unit/test_llm_client_budget.py` (6) and
+  `tests/unit/test_e1_budget.py` (8) for the budget mechanisms,
+  `scripts/e1_budget.py` (guard), `scripts/e1_runner.py` (runner, zero-cost
+  dry run locked by `tests/integration/test_e1_runner_dryrun.py`), and
+  `06-preflight-and-freeze.md` (results + freeze manifest)

@@ -71,6 +71,9 @@ def test_dryrun_artifacts_retained() -> None:
     report = json.loads((ok_sandbox / "run-report.json").read_text(encoding="utf-8"))
     assert report["briefs_version"] == "e1-briefs-v1"
     assert report["scenarios"][0]["artifacts"]["html"] == "games/dryrun.html"
+    # the report self-documents the executing baseline (commit + dirty flag)
+    assert isinstance(report["commit"], str) and len(report["commit"]) >= 7
+    assert isinstance(report["commit_dirty"], bool)
 
 
 def test_sandbox_reuse_refused() -> None:

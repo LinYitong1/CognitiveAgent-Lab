@@ -34,6 +34,7 @@ import argparse
 import asyncio
 import json
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -121,6 +122,28 @@ DEFAULT_PRICE_IN = 0.75   # $/1M input tokens (gemini-3.8-flash intro rate)
 DEFAULT_PRICE_OUT = 3.75  # $/1M output tokens (thinking billed as output)
 REAL_MAX_TOKENS = 8192
 REAL_MAX_INPUT_BYTES = 96 * 1024
+
+
+def _git_head() -> tuple[str, bool]:
+    """(commit, dirty) of the repo at run time — recorded into every run
+    report so the executed baseline is self-documenting; ('unknown', True) on
+    any failure (never blocks a run)."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
+            capture_output=True, text=True, timeout=10,
+        )
+        commit = out.stdout.strip() if out.returncode == 0 else "unknown"
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=REPO_ROOT,
+            capture_output=True, text=True, timeout=10,
+        )
+        # ignore untracked-but-gitignored-adjacent noise: only tracked-file
+        # modifications make the tree 'dirty' for baseline purposes
+        dirty = bool(status.stdout.strip()) if status.returncode == 0 else True
+        return commit, dirty
+    except Exception:
+        return "unknown", True
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +287,7 @@ async def run_task(
     elif not rendered:
         failure_class = "no-artifacts"
 
+    commit, commit_dirty = _git_head()
     summary = guard.summary()
     scenario: dict[str, Any] = {
         "scenario": task_id,
@@ -297,6 +321,8 @@ async def run_task(
         "provider": provider,
         "model": model,
         "base_url": base_url,
+        "commit": commit,
+        "commit_dirty": commit_dirty,
         "sandbox": str(sandbox),
         "budget": {
             "max_calls": guard.max_calls,
